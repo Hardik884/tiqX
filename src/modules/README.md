@@ -15,8 +15,9 @@ Conventions (see `health/` for the working example):
   <module>.types.ts       shared types
 ```
 
-Folders that currently hold only a `.gitkeep` are placeholders for planned
-modules and intentionally contain no implementation yet:
+`events`, `venues` and `seats` are partially implemented: event creation and
+the per-event seat inventory derived from a venue's seat map. Folders that hold
+only a `.gitkeep` are placeholders and intentionally contain no code yet.
 
 | Module          | Planned responsibility                          |
 | --------------- | ----------------------------------------------- |
@@ -24,7 +25,7 @@ modules and intentionally contain no implementation yet:
 | `users`         | profile management                              |
 | `venues`        | venues and their physical seat layout           |
 | `events`        | movies and concerts scheduled at a venue        |
-| `seats`         | per-event seat inventory and pricing            |
+| `seats`         | per-event seat inventory (`show_seats`)         |
 | `reservations`  | temporary seat holds                            |
 | `bookings`      | confirmed bookings and payment state            |
 | `waitlist`      | queueing for sold-out events                    |

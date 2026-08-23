@@ -24,3 +24,15 @@ export class NotFoundError extends AppError {
     super(message, 404, 'NOT_FOUND', details);
   }
 }
+
+export class BadRequestError extends AppError {
+  constructor(message = 'Invalid request', details?: unknown) {
+    super(message, 400, 'BAD_REQUEST', details);
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message = 'Conflicting resource state', details?: unknown) {
+    super(message, 409, 'CONFLICT', details);
+  }
+}

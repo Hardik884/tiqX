@@ -18,6 +18,13 @@ const poolConfig: PoolConfig = {
 };
 
 /**
+ * Anything that can run a query: the pool itself, or a client bound to an open
+ * transaction. Repositories accept this so the same function works inside and
+ * outside a transaction.
+ */
+export type Queryable = Pick<PoolClient, 'query'>;
+
+/**
  * The single connection pool for the process. Every module must query through
  * this file so pool sizing, timeouts and shutdown live in one place.
  */
