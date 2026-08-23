@@ -14,12 +14,12 @@ export function trackEvent(eventId: string): void {
   createdEventIds.push(eventId);
 }
 
-export async function seedOrganiser(): Promise<string> {
+async function seedUser(role: 'customer' | 'organiser'): Promise<string> {
   const result = await query<IdRow>(
     `INSERT INTO users (name, email, password_hash, role)
-     VALUES ($1, $2, $3, 'organiser')
+     VALUES ($1, $2, $3, $4)
      RETURNING id`,
-    ['Test Organiser', `organiser-${randomUUID()}@example.test`, 'not-a-real-hash'],
+    [`Test ${role}`, `${role}-${randomUUID()}@example.test`, 'not-a-real-hash', role],
   );
 
   const id = result.rows[0]!.id;
@@ -27,13 +27,29 @@ export async function seedOrganiser(): Promise<string> {
   return id;
 }
 
+export async function seedOrganiser(): Promise<string> {
+  return seedUser('organiser');
+}
+
+/** A customer is who places a reservation hold. */
+export async function seedCustomer(): Promise<string> {
+  return seedUser('customer');
+}
+
 export interface SeededVenue {
   venueId: string;
   seatIds: string[];
 }
 
-/** Creates a venue with `seatCount` seats in a single row, e.g. A1..A3. */
-export async function seedVenue(seatCount: number, rowLabel = 'A'): Promise<SeededVenue> {
+/**
+ * Creates a venue with `seatCount` seats in a single row, e.g. A1..A3.
+ * `firstSeatNumber` shifts the numbering, so A12..A14 is seedVenue(3, 'A', 12).
+ */
+export async function seedVenue(
+  seatCount: number,
+  rowLabel = 'A',
+  firstSeatNumber = 1,
+): Promise<SeededVenue> {
   const venue = await query<IdRow>(
     `INSERT INTO venues (name, description) VALUES ($1, $2) RETURNING id`,
     [`Test Venue ${randomUUID()}`, 'Created by the test suite'],
@@ -43,7 +59,8 @@ export async function seedVenue(seatCount: number, rowLabel = 'A'): Promise<Seed
   createdVenueIds.push(venueId);
 
   const seatIds: string[] = [];
-  for (let seatNumber = 1; seatNumber <= seatCount; seatNumber += 1) {
+  const lastSeatNumber = firstSeatNumber + seatCount - 1;
+  for (let seatNumber = firstSeatNumber; seatNumber <= lastSeatNumber; seatNumber += 1) {
     const seat = await query<IdRow>(
       `INSERT INTO venue_seats (venue_id, row_label, seat_number, category)
        VALUES ($1, $2, $3, 'standard')
