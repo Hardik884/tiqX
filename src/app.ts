@@ -18,6 +18,11 @@ export function createApp(): Express {
 
   app.disable('x-powered-by');
 
+  // Decides whether req.ip believes X-Forwarded-For, which is what the
+  // IP-keyed rate limits are counted against. Off unless configured: see
+  // TRUST_PROXY in config for why enabling it in the wrong place is a bypass.
+  app.set('trust proxy', config.trustProxy);
+
   // First, so every response - including body-parser failures - is correlated.
   app.use(requestId);
 

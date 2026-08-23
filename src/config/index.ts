@@ -17,6 +17,19 @@ const UNSAFE_JWT_SECRETS = new Set([
   'replace-this-with-a-long-random-value-min-32-chars',
 ]);
 
+/**
+ * Accepts only URLs a Redis client can actually dial, so a typo fails at boot
+ * with a clear message instead of as a connection error minutes later.
+ */
+function isRedisUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'redis:' || url.protocol === 'rediss:';
+  } catch {
+    return false;
+  }
+}
+
 /** Env vars arrive as strings; accept the usual truthy spellings. */
 const booleanFromEnv = z
   .enum(['true', 'false', '1', '0'])
@@ -61,6 +74,42 @@ const envSchema = z.object({
     .min(3_600)
     .max(60 * 60 * 24 * 90)
     .default(60 * 60 * 24 * 30),
+
+  // ---------------------------------------------------------------------------
+  // Redis
+  // ---------------------------------------------------------------------------
+  // Required, like JWT_SECRET: Redis is a hard dependency of this deployment,
+  // and the rate limiter fails closed without it. Starting without a URL would
+  // mean starting an API that cannot protect its own auth endpoints.
+  REDIS_URL: z
+    .string()
+    .min(1)
+    .refine((value) => isRedisUrl(value), {
+      message: 'must be a redis:// or rediss:// URL',
+    }),
+  // Prefixes every key. Distinct values give two deployments - or two test runs
+  // - an isolated keyspace on one Redis server.
+  REDIS_NAMESPACE: z.string().min(1).max(32).regex(/^[a-z0-9-]+$/, 'must be lower-case alphanumeric').default('tiqx'),
+  REDIS_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+
+  // ---------------------------------------------------------------------------
+  // Rate limiting
+  // ---------------------------------------------------------------------------
+  // Trust X-Forwarded-For when resolving the client IP.
+  //
+  // Off by default, and only ever safe behind a proxy that overwrites the
+  // header. Enabled where it should not be, any client can spoof its own IP and
+  // walk straight past an IP-keyed limit. Behind a load balancer the opposite
+  // is true: without it every request looks like it came from the balancer and
+  // all callers share one bucket.
+  TRUST_PROXY: booleanFromEnv.default(false),
+
+  RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_LOGIN_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
+  RATE_LIMIT_REGISTER_MAX: z.coerce.number().int().positive().default(5),
+  RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().positive().default(3_600),
+  RATE_LIMIT_REFRESH_MAX: z.coerce.number().int().positive().default(20),
+  RATE_LIMIT_REFRESH_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -91,6 +140,29 @@ export const config = {
     idleTimeoutMs: env.DATABASE_IDLE_TIMEOUT_MS,
     connectionTimeoutMs: env.DATABASE_CONNECTION_TIMEOUT_MS,
     statementTimeoutMs: env.DATABASE_STATEMENT_TIMEOUT_MS,
+  },
+  trustProxy: env.TRUST_PROXY,
+  redis: {
+    url: env.REDIS_URL,
+    namespace: env.REDIS_NAMESPACE,
+    connectTimeoutMs: env.REDIS_CONNECT_TIMEOUT_MS,
+  },
+  rateLimit: {
+    login: {
+      name: 'login',
+      max: env.RATE_LIMIT_LOGIN_MAX,
+      windowSeconds: env.RATE_LIMIT_LOGIN_WINDOW_SECONDS,
+    },
+    register: {
+      name: 'register',
+      max: env.RATE_LIMIT_REGISTER_MAX,
+      windowSeconds: env.RATE_LIMIT_REGISTER_WINDOW_SECONDS,
+    },
+    refresh: {
+      name: 'refresh',
+      max: env.RATE_LIMIT_REFRESH_MAX,
+      windowSeconds: env.RATE_LIMIT_REFRESH_WINDOW_SECONDS,
+    },
   },
   auth: {
     jwtSecret: env.JWT_SECRET,

@@ -3,6 +3,7 @@ import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { config } from './config/index.js';
 import { closePool, verifyDatabaseConnection } from './db/pool.js';
+import { closeRedis, connectRedis, verifyRedisConnection } from './redis/client.js';
 import { logger } from './utils/logger.js';
 
 let shuttingDown = false;
@@ -33,6 +34,10 @@ async function shutdown(server: Server, reason: string, exitCode: number): Promi
         resolve();
       });
     });
+    // Reverse of startup: stop taking work, then release dependencies. Redis
+    // before PostgreSQL only because it is the cheaper handshake to unwind;
+    // neither can be in use once the HTTP server has closed.
+    await closeRedis();
     await closePool();
     logger.info('Shutdown complete');
     process.exit(exitCode);
@@ -45,6 +50,9 @@ async function shutdown(server: Server, reason: string, exitCode: number): Promi
 }
 
 async function start(): Promise<void> {
+  // Configuration is already validated by the time this module loads - the
+  // config module exits the process on a bad env - so startup only has to
+  // establish and verify the dependencies, in order, before opening the port.
   try {
     await verifyDatabaseConnection();
     logger.info('Connected to PostgreSQL');
@@ -52,6 +60,21 @@ async function start(): Promise<void> {
     logger.error('Unable to reach PostgreSQL, aborting startup', {
       error: error instanceof Error ? error.message : String(error),
     });
+    process.exit(1);
+  }
+
+  // Redis is a required dependency: the auth endpoints fail closed without it.
+  // Refusing to start beats starting an instance that would accept traffic it
+  // cannot protect, and a crash-looping container is a far louder signal than
+  // an API quietly serving 503s.
+  try {
+    await connectRedis();
+    await verifyRedisConnection();
+  } catch (error) {
+    logger.error('Unable to reach Redis, aborting startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await closeRedis();
     process.exit(1);
   }
 

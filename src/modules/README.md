@@ -36,4 +36,5 @@ and intentionally contain no code yet.
 | `notifications` | email and in-app notifications                  |
 | `analytics`     | reporting for organisers and admins             |
 | `idempotency`   | stored responses for safely retryable writes    |
+| `rate-limit`    | Redis-backed distributed request limiting       |
 | `users`         | shared role vocabulary                          |

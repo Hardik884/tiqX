@@ -8,11 +8,13 @@ import { createApp } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
 import { hashRefreshToken } from '../src/modules/auth/token.service.js';
 import { cleanupAuthedUsers } from './helpers/auth.js';
+import { closeTestRedis, connectTestRedis, uniqueClientIp } from './helpers/redis.js';
 
 let server: Server;
 let baseUrl: string;
 
 before(async () => {
+  await connectTestRedis();
   server = createApp().listen(0);
   await new Promise<void>((resolve) => server.once('listening', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -24,6 +26,7 @@ after(async () => {
   });
   await query("DELETE FROM users WHERE email LIKE '%@authtest.test'");
   await cleanupAuthedUsers();
+  await closeTestRedis();
   await closePool();
 });
 
@@ -37,7 +40,7 @@ interface TokenJson {
 async function post(path: string, body: unknown): Promise<{ status: number; json: TokenJson }> {
   const response = await fetch(`${baseUrl}/api/v1${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': uniqueClientIp() },
     body: JSON.stringify(body),
   });
   const text = await response.text();

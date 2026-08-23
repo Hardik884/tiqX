@@ -12,6 +12,7 @@ intentionally not implemented yet.
 
 - Node.js >= 20
 - PostgreSQL >= 13 (`gen_random_uuid()` is used without an extension)
+- Redis >= 6 (the API refuses to start without it - see [Redis](#redis))
 
 ## Getting started
 
@@ -19,10 +20,15 @@ intentionally not implemented yet.
 # 1. install dependencies
 npm install
 
-# 2. create your local environment file and point DATABASE_URL at your database
+# 2. create your local environment file, then point DATABASE_URL and REDIS_URL
+#    at your database and cache, and set a real JWT_SECRET
 cp .env.example .env
 
-# 3. create the schema
+# 3. start Redis and confirm it answers
+docker run -d --name tiqx-redis -p 6379:6379 redis:7-alpine
+redis-cli ping            # -> PONG
+
+# 4. create the schema
 npm run migrate:up
 
 # 4. run the API in watch mode
@@ -47,7 +53,7 @@ npm start
 | `npm run migrate:up`     | Apply pending migrations                             |
 | `npm run migrate:down`   | Roll back the most recent migration                  |
 | `npm run migrate:create` | Scaffold a new TypeScript migration                  |
-| `npm test`               | Run the integration test suite (needs a migrated DB)  |
+| `npm test`               | Run the integration tests (needs a migrated DB and Redis) |
 
 ## Endpoints
 
@@ -527,6 +533,142 @@ There is **no fallback** to a body field — a fallback *is* the vulnerability,
 and a test reintroducing `userId ?? req.user.id` demonstrably lets one user
 create a hold owned by another.
 
+## Redis
+
+> **Redis is not the source of truth for seat ownership.**
+>
+> PostgreSQL remains authoritative for `show_seats` state, holds, hold-seat
+> links, bookings and expiry correctness. Nothing in Redis decides whether a
+> seat is available, and there is no `seat:A12 = locked` key. Seat contention is
+> settled by `SELECT ... FOR UPDATE` inside one transaction, which is where it
+> will stay.
+
+Redis exists here for **ephemeral infrastructure state** - data that may be lost
+without corrupting anything. Today that is exactly one thing: distributed rate
+limiting.
+
+| Concern | Owner |
+| ------- | ----- |
+| Seat state, holds, hold-seat links | PostgreSQL |
+| Users, credentials, refresh tokens | PostgreSQL |
+| Idempotency records and stored responses | PostgreSQL |
+| Rate-limit counters | Redis |
+
+### Running Redis locally
+
+```bash
+docker run -d --name tiqx-redis -p 6379:6379 redis:7-alpine
+# or: redis-server --port 6379
+# or: brew services start redis / sudo systemctl start redis
+```
+
+### Verifying connectivity
+
+```bash
+redis-cli ping                       # PONG
+curl -s localhost:4000/health        # liveness; never touches Redis
+curl -s localhost:4000/health/ready  # {"dependencies":{"database":"up","redis":"up"}}
+```
+
+`/health` is liveness and deliberately ignores dependencies - a probe that
+failed during a Redis outage would have the orchestrator restart a healthy
+process, which cannot fix anything. `/health/ready` returns `503` with
+`redis: "down"` when Redis is unreachable, so the instance leaves the load
+balancer's rotation. Neither response contains a host, URL or error text; the
+detail is logged with the request id instead.
+
+### Key namespace
+
+```
+<namespace>:<version>:<purpose>:<parts...>
+tiqx:v1:rate-limit:login:a1b2c3d4e5f6...
+```
+
+Every key is built by `src/redis/keys.ts`; no module writes a raw key string.
+`REDIS_NAMESPACE` isolates deployments (and test runs) sharing one server, and
+the `v1` segment means a key's meaning can change by bumping the version and
+letting the old keys age out under their TTLs.
+
+Caller-supplied components are **hashed**, not interpolated. Redis keys have no
+escaping, so a colon inside an identifier would be indistinguishable from a
+separator and could be steered into another caller's bucket. Hashing also bounds
+cardinality and keeps the email and IP of a failed login out of the keyspace.
+
+### Rate limiting
+
+| Endpoint | Limit | Window | Keyed on |
+| -------- | ----- | ------ | -------- |
+| `POST /auth/login` | 10 | 5 min | email + IP |
+| `POST /auth/register` | 5 | 1 hour | IP |
+| `POST /auth/refresh` | 20 | 5 min | IP |
+
+All configurable. `POST /auth/logout` is deliberately unlimited, because ending
+a session must always be possible.
+
+**Identifiers.** Login uses email *and* IP: email alone would let anyone lock a
+victim out by failing logins on their behalf, and IP alone punishes everyone
+behind one NAT. Register uses IP, because the attacker picks the email and
+keying on it would hand out a fresh allowance per attempt. Refresh uses IP for
+the same reason plus one more - keying on the presented token would mint a new
+Redis key for every invalid token submitted, which is unbounded cardinality and
+no limiting at all.
+
+**Algorithm: fixed window.** One counter per key, created by the first request
+and expiring with the window. The tradeoff is real: with 10 per 5 minutes a
+caller can spend 10 at 04:59:59 and 10 more at 05:00:01 - twice the nominal rate
+in two seconds, entirely within the rules. Fixed windows bound sustained abuse,
+not bursts. A sliding window or token bucket would smooth that at the cost of
+storing timestamps rather than one integer; the limiter returns a decision
+rather than exposing its counter, so swapping the algorithm touches one file.
+
+**Atomicity.** Increment and expiry happen in one Lua script. `INCR` followed by
+a separate `EXPIRE` can fail between the two round trips and leave a counter
+with no TTL - a key that never resets, locking an identifier out permanently.
+Redis runs the script atomically, and the TTL is set only on the increment that
+created the key, so later requests cannot extend a window already in progress.
+
+**Fail closed.** If Redis cannot answer, these three endpoints return `503`
+(`DEPENDENCY_UNAVAILABLE`), not `429` and not success.
+
+That is deliberate and costs availability. Failing open would turn a Redis
+outage into an unmetered window against the credential surface, precisely when
+monitoring is noisiest. Failing closed is bounded, visible and self-announcing,
+and readiness already pulls the instance from rotation. There is **no in-memory
+fallback**: a process-local counter would claim protection that does not hold
+across instances, which is the one guarantee this feature exists to provide. The
+reasoning is specific to auth endpoints - a read-only listing endpoint would
+sensibly fail open, which is why the policy lives in the middleware rather than
+the limiter.
+
+A limited response never mentions Redis, a key or a counter:
+
+```json
+{ "error": { "code": "RATE_LIMITED", "message": "Too many requests. Try again later." } }
+```
+
+It carries `Retry-After`, plus `RateLimit-Limit`, `RateLimit-Remaining` and
+`RateLimit-Reset` headers so a well-behaved client can slow down before it is
+refused.
+
+### Behind a proxy
+
+`TRUST_PROXY` (default `false`) decides whether `X-Forwarded-For` is believed
+when resolving the client IP. Enable it **only** behind a proxy that overwrites
+the header: enabled anywhere else, any client can spoof its address and walk
+past an IP-keyed limit. Left off behind a load balancer the opposite breaks -
+every request appears to come from the balancer and all callers share one
+bucket.
+
+### Startup and shutdown
+
+Startup validates configuration, connects PostgreSQL, connects and pings Redis,
+and only then opens the port. If Redis is unreachable the process **exits**
+rather than serving traffic it cannot protect - a crash-looping container is a
+louder signal than an API quietly returning 503s. Shutdown closes the HTTP
+server, then Redis, then the PostgreSQL pool, through the existing graceful
+shutdown path.
+
+
 Design rules applied throughout:
 
 - UUID primary keys (`gen_random_uuid()`)
@@ -543,13 +685,24 @@ Design rules applied throughout:
 
 ## Tests
 
-The suite is integration-level: it exercises the real schema, so it needs a
-running PostgreSQL with migrations applied.
+The suite is integration-level: it exercises the real schema and a real Redis,
+never a stand-in. A fake in-memory Redis would pass every test here while
+proving nothing about atomicity, TTLs, or state shared between processes.
 
 ```bash
-cp .env.example .env   # DATABASE_URL must point at a database you can write to
+cp .env.example .env   # DATABASE_URL and REDIS_URL must point at real services
 npm run migrate:up
 npm test
 ```
+
+Two suites deserve mention. `rate-limit.distributed.test.ts` spawns **two real
+API processes** against one Redis and alternates requests between them, which is
+the only way to tell a shared counter from a process-local one.
+`redis.failure.test.ts` drops the connection mid-suite to prove the fail-closed
+policy holds and that no Redis detail reaches a client.
+
+Rate limits are live during tests. Rather than disabling the middleware, each
+suite presents a distinct `X-Forwarded-For` so its identifiers are isolated;
+the rate-limit suites pin one address deliberately in order to hit the limit.
 
 Tests create their own venues and organisers and delete them afterwards.
