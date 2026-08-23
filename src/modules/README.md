@@ -17,8 +17,10 @@ Conventions (see `health/` for the working example):
 
 `events`, `venues`, `seats` and `reservations` are partially implemented: event
 creation with its derived seat inventory, and the transactional hold operation
-that temporarily reserves seats. `idempotency` is a supporting module rather
-than a feature: it wraps a write so retrying it is safe. Folders that hold only a `.gitkeep` are placeholders
+that temporarily reserves seats. `auth` is implemented: registration, login,
+JWT access tokens and rotating refresh tokens, plus the middleware that other
+modules mount. `idempotency` is a supporting module rather than a feature: it
+wraps a write so retrying it is safe. Folders that hold only a `.gitkeep` are placeholders
 and intentionally contain no code yet.
 
 | Module          | Planned responsibility                          |
@@ -34,3 +36,4 @@ and intentionally contain no code yet.
 | `notifications` | email and in-app notifications                  |
 | `analytics`     | reporting for organisers and admins             |
 | `idempotency`   | stored responses for safely retryable writes    |
+| `users`         | shared role vocabulary                          |

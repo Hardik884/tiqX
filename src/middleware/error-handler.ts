@@ -82,7 +82,16 @@ export function errorHandler(
     path: req.path,
     statusCode: normalized.statusCode,
     code: normalized.code,
-    stack: error instanceof Error ? error.stack : undefined,
+    // Only unexpected failures carry a stack, for the same reason the response
+    // omits one on an AppError: a deliberate rejection is fully described by
+    // its code, and the trace turns a uniform error into an oracle. Two login
+    // failures that must be indistinguishable differ by a line number in the
+    // stack, and a log reader could tell "no such account" from "wrong
+    // password" from that alone.
+    //
+    // Request bodies and headers are never logged here, so passwords, tokens
+    // and Authorization values cannot reach the log through this path.
+    stack: error instanceof AppError ? undefined : error instanceof Error ? error.stack : undefined,
   };
 
   if (normalized.statusCode >= 500) {
@@ -97,8 +106,17 @@ export function errorHandler(
       message: normalized.message,
       ...(normalized.details === undefined ? {} : { details: normalized.details }),
       ...(requestId === undefined ? {} : { requestId }),
-      // Stack traces are a debugging aid only; never returned in production.
-      ...(config.isProduction || !(error instanceof Error) ? {} : { stack: error.stack }),
+      // Stack traces are a debugging aid for *unexpected* failures only, and
+      // never returned in production.
+      //
+      // An AppError never carries one, even in development. Its message is the
+      // whole intended answer, so a stack adds nothing to debug - and for the
+      // deliberately uniform errors it actively defeats them: two login
+      // failures that must be indistinguishable differ by a line number in the
+      // trace, which is enough to tell "no such account" from "wrong password".
+      ...(config.isProduction || error instanceof AppError || !(error instanceof Error)
+        ? {}
+        : { stack: error.stack }),
     },
   });
 }

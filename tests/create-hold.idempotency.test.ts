@@ -6,6 +6,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { createApp } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
+import { accessTokenForUser } from './helpers/auth.js';
 import { cleanupSeedData, seedCustomer, seedLiveHold, seedShow } from './helpers/seed.js';
 
 let server: Server;
@@ -36,6 +37,10 @@ interface HoldResponse {
 }
 
 interface HoldRequest {
+  /**
+   * A test convenience meaning "act as this user". The helper turns it into a
+   * bearer token; the wire body has no userId field at all.
+   */
   userId: string;
   showSeatIds: string[];
   ttlSeconds?: number;
@@ -46,13 +51,16 @@ async function postHold(
   body: HoldRequest,
   idempotencyKey: string | null,
 ): Promise<{ status: number; json: HoldResponse }> {
+  const { userId, ...payload } = body;
+
   const response = await fetch(`${baseUrl}/api/v1/events/${eventId}/holds`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      authorization: `Bearer ${await accessTokenForUser(userId)}`,
       ...(idempotencyKey === null ? {} : { 'idempotency-key': idempotencyKey }),
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
   return { status: response.status, json: (await response.json()) as HoldResponse };
 }

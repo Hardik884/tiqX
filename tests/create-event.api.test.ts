@@ -5,6 +5,7 @@ import type { Server } from 'node:http';
 
 import { createApp } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
+import { accessTokenForUser } from './helpers/auth.js';
 import { cleanupSeedData, seedOrganiser, seedVenue, trackEvent } from './helpers/seed.js';
 
 let server: Server;
@@ -31,11 +32,25 @@ interface EventResponse {
   error?: { code: string; message: string };
 }
 
-async function postEvent(body: unknown): Promise<{ status: number; json: EventResponse }> {
+/**
+ * `organiserId` is a test convenience meaning "act as this organiser": the
+ * helper turns it into a bearer token, and the wire body has no such field.
+ * Omit it to send the request unauthenticated.
+ */
+async function postEvent(
+  body: { organiserId?: string } & Record<string, unknown>,
+): Promise<{ status: number; json: EventResponse }> {
+  const { organiserId, ...payload } = body;
+
   const response = await fetch(`${baseUrl}/api/v1/events`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    headers: {
+      'content-type': 'application/json',
+      ...(organiserId === undefined
+        ? {}
+        : { authorization: `Bearer ${await accessTokenForUser(organiserId)}` }),
+    },
+    body: JSON.stringify(payload),
   });
   return { status: response.status, json: (await response.json()) as EventResponse };
 }

@@ -6,6 +6,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { createApp } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
+import { accessTokenForUser } from './helpers/auth.js';
 import {
   cleanupSeedData,
   seedCustomer,
@@ -41,22 +42,31 @@ interface HoldResponse {
 }
 
 /**
- * Sends a hold request with a fresh Idempotency-Key by default, so each call is
- * a distinct logical request. Pass `idempotencyKey` to retry one deliberately,
+ * Sends a hold request as a given user, with a fresh Idempotency-Key by default
+ * so each call is a distinct logical request.
+ *
+ * `userId` is a *test* convenience meaning "act as this user": the helper turns
+ * it into a real bearer token and it never appears in the request body, which
+ * no longer has such a field. Pass `idempotencyKey` to retry one deliberately,
  * or null to omit the header.
  */
 async function postHold(
   eventId: string,
-  body: unknown,
+  body: { userId?: string } & Record<string, unknown>,
   idempotencyKey: string | null = randomUUID(),
 ): Promise<{ status: number; json: HoldResponse }> {
+  const { userId, ...payload } = body;
+
   const response = await fetch(`${baseUrl}/api/v1/events/${eventId}/holds`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       ...(idempotencyKey === null ? {} : { 'idempotency-key': idempotencyKey }),
+      ...(userId === undefined
+        ? {}
+        : { authorization: `Bearer ${await accessTokenForUser(userId)}` }),
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
   return { status: response.status, json: (await response.json()) as HoldResponse };
 }
@@ -213,26 +223,37 @@ describe('POST /api/v1/events/:eventId/holds - validation', () => {
     assert.equal(await countHolds(eventId), 0);
   });
 
-  it('rejects a malformed userId', async () => {
+  it('rejects a body that still carries the removed userId field', async () => {
     const { eventId, seats } = await seedShow(1);
+    const userId = await seedCustomer();
 
-    const { status } = await postHold(eventId, {
-      userId: 'not-a-uuid',
+    // The strict schema turns a stale client into a visible 400 rather than
+    // silently dropping the field and looking like it worked.
+    const { status, json } = await postHold(eventId, {
+      userId,
+      // Sent inside the JSON body rather than as the acting user.
+      extraBodyUserId: userId,
       showSeatIds: [seats[0]!.id],
     });
+
     assert.equal(status, 400);
+    assert.equal(json.error?.code, 'BAD_REQUEST');
+    assert.equal(await countHolds(eventId), 0);
   });
 
-  it('rejects a nonexistent user', async () => {
+  it('rejects a token naming a user that does not exist', async () => {
     const { eventId, seats } = await seedShow(1);
 
+    // A validly signed token whose subject was deleted: the middleware re-reads
+    // the user, so the token stops working immediately rather than lasting out
+    // its expiry.
     const { status, json } = await postHold(eventId, {
       userId: randomUUID(),
       showSeatIds: [seats[0]!.id],
     });
 
-    assert.equal(status, 404);
-    assert.equal(json.error?.code, 'NOT_FOUND');
+    assert.equal(status, 401);
+    assert.equal(json.error?.code, 'UNAUTHORIZED');
     assert.equal((await seatStatuses([seats[0]!.id]))[seats[0]!.id], 'available');
   });
 

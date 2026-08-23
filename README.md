@@ -55,8 +55,13 @@ npm start
 | ------ | --------------- | -------------------------------------------------- |
 | `GET`  | `/health`       | Liveness. Confirms the process is serving requests. |
 | `GET`  | `/health/ready` | Readiness. Also verifies PostgreSQL is reachable.   |
-| `POST` | `/api/v1/events`| Create an event and its initial seat inventory.     |
-| `POST` | `/api/v1/events/:eventId/holds` | Temporarily hold seats for a customer. |
+| `POST` | `/api/v1/auth/register` | Create a customer account.                  |
+| `POST` | `/api/v1/auth/login`    | Exchange credentials for a token pair.      |
+| `POST` | `/api/v1/auth/refresh`  | Rotate a refresh token for a new pair.      |
+| `POST` | `/api/v1/auth/logout`   | Revoke a refresh token.                     |
+| `GET`  | `/api/v1/auth/me`       | The authenticated principal. **Auth.**      |
+| `POST` | `/api/v1/events`| Create an event and its inventory. **Organiser/admin.** |
+| `POST` | `/api/v1/events/:eventId/holds` | Temporarily hold seats. **Auth.**   |
 
 Neither endpoint returns configuration, credentials or connection details.
 `/health/ready` responds `503` with `{"dependencies":{"database":"down"}}` when
@@ -90,6 +95,7 @@ migrations/                versioned schema migrations (node-pg-migrate)
 | `reservation_holds` | a customer's temporary claim on seats of one event |
 | `reservation_hold_seats` | which show seats a hold covers                |
 | `idempotency_keys` | stored responses that make a retried write safe to repeat |
+| `refresh_tokens` | server-side session state; stores digests, never tokens |
 
 ### Physical seats vs. show seats
 
@@ -219,10 +225,11 @@ reservation service's job.
 ```
 
 `Idempotency-Key` is **required** — see [Idempotency](#idempotency) below.
+So is `Authorization: Bearer <access-token>` — see [Authentication](#authentication).
 
-`userId` is read from the body **temporarily**, because authentication does not
-exist yet. It becomes the authenticated principal later and must not be treated
-as an authorisation signal in the meantime.
+The hold's owner is the authenticated principal. There is **no `userId` field**:
+the schema is strict, so a client still sending one gets a `400` rather than
+having it silently ignored.
 
 Bounds: 1–10 seats, no duplicates, `ttlSeconds` 60–900 (default 600). The client
 supplies a *duration*; `expires_at` is computed by PostgreSQL from its own clock,
@@ -384,6 +391,141 @@ committing the record in a separate transaction from the rolled-back hold —
 exactly the split this design exists to avoid. It is also friendlier: a seat
 that was taken a moment ago may since have been released, and the retry should
 be allowed to get it.
+
+## Authentication
+
+Identity is established by the server, never asserted by the client.
+
+```
+HTTP -> request-id -> requireAuth -> requireRole -> controller -> service -> repository
+```
+
+`requireAuth` answers *who is this*; `requireRole` answers *may they*. Keeping
+them separate is why no controller contains a role check.
+
+### Passwords
+
+Argon2id (`@node-rs/argon2`) at the OWASP baseline — 19 MiB memory, 2 passes, 1
+lane. A general-purpose hash like SHA-256 is built to be fast, which is exactly
+wrong for passwords: speed is the attacker's budget, and the memory cost is what
+makes GPU cracking expensive. Parameters live inside the digest, so they can be
+raised later without invalidating existing hashes. Verification always goes
+through the library's own constant-time comparison.
+
+Registration takes `{ email, password }` (plus an optional `name`, defaulted
+from the email's local part because `users.name` is `NOT NULL`). **`role` is
+never accepted from a client** — every account starts as `customer`.
+
+### Login is deliberately uninformative
+
+Wrong password and unknown email return a byte-identical response:
+
+```json
+{ "error": { "code": "INVALID_CREDENTIALS", "message": "Invalid credentials" } }
+```
+
+Three things had to be true for that to hold, and all three are tested:
+
+- the **timing** matches — an unknown email still pays for one Argon2
+  verification, against a decoy digest, so response time does not reveal
+  whether an address is registered;
+- the **response** carries no stack — the error handler omits it for any
+  deliberate `AppError`, because the trace's line number alone distinguished
+  the two branches;
+- the **log line** carries no stack either, for the same reason. Anyone with
+  log access would otherwise have the oracle the API denies them.
+
+### Access tokens
+
+Short-lived JWTs, HS256, signed with `JWT_SECRET`. Claims are `sub`, `role`,
+`iss`, `aud`, `iat`, `exp`, `jti` — and nothing else. A JWT is signed, not
+encrypted, so email and user detail stay out of it.
+
+Verification pins the algorithm and checks issuer and audience. Pinning matters:
+without it a token can ask to be verified as `alg: none`. Both forgeries are
+tested.
+
+The middleware **re-reads the user** on every request rather than trusting the
+token wholesale. A JWT is a snapshot; without the re-read, a deleted account or
+a demoted organiser would keep their old powers until expiry. The database is
+the authority on role, and the token's claim only reflects it.
+
+`JWT_SECRET` is required, must be ≥32 characters, and the placeholder shipped in
+`.env.example` is rejected by name — an unedited copy fails fast instead of
+signing tokens with a value that is public in this repository.
+
+### Refresh tokens
+
+32 random bytes, base64url. Deliberately **not** a JWT: a self-describing token
+is honoured on its contents alone, which is what makes revocation impossible.
+This one means nothing except as a lookup into a row the server controls.
+
+Only a SHA-256 digest is stored. Plain SHA-256 rather than Argon2 is correct
+here — the input is 256 bits of uniform randomness, so there is no dictionary to
+grind and no benefit to a slow KDF; what matters is that the stored value is not
+itself a usable credential.
+
+Rotation is one locked transaction:
+
+```
+BEGIN
+  SELECT ... WHERE token_hash = $1 FOR UPDATE
+  reject if missing / revoked / expired
+  UPDATE ... SET revoked_at = now()
+  INSERT replacement, rotated_from -> old row
+COMMIT
+```
+
+`FOR UPDATE` is what makes "a refresh token works exactly once" true under
+concurrency — two simultaneous refreshes serialise and the second finds the
+token revoked. A failed rotation rolls back entirely, leaving the original
+usable rather than stranding the caller with nothing. Both are tested.
+
+**Reuse detection.** A token that is found but already revoked has been
+presented twice. Benignly that is a client retry; otherwise it leaked. The two
+are indistinguishable from the server, so every live token for that user is
+revoked and the caller refused. Note this revocation commits in its *own*
+transaction — performing it inside the rotation transaction and then throwing
+would roll it back, which is a bug this code had until a test caught it.
+
+**Logout** revokes the presented token and always answers `204`, even for an
+unknown or already-revoked token: it must be safe to retry, and must not tell an
+unauthenticated caller which tokens exist.
+
+**Access tokens are not revoked on logout.** They cannot be without a
+revocation list consulted on every request, which is the per-request state JWTs
+exist to avoid. The mitigation is the short TTL: the refresh chain dies at once
+and the access token lapses within minutes. Anything needing instant kill-switch
+semantics wants server-side sessions, not JWTs.
+
+### Client token storage
+
+Refresh tokens are returned in JSON. That is an **API-level** decision suited to
+scripted clients and this test suite. A browser client should not keep them in
+`localStorage` — anything reachable by JavaScript is reachable by injected
+JavaScript. Production browser delivery should use an `HttpOnly; Secure;
+SameSite` cookie so the token is never scriptable, with the access token held in
+memory only.
+
+### Authorization
+
+```ts
+eventRouter.post('/', requireAuth, requireRole('organiser', 'admin'), createEventHandler);
+eventRouter.use('/:eventId/holds', requireAuth, reservationRouter);
+```
+
+`requireRole` takes a list of roles and nothing more — no permission matrix, no
+inheritance. The three roles the database already recognises are the whole
+model. Resource-level rules ("an organiser may edit *their own* event") are a
+different question and belong in a service, not in this shape.
+
+### Where the reservation's user comes from
+
+`req.user.id`, read once in the controller, feeding three things that must
+agree: the hold's `user_id`, the idempotency key's scope, and the request hash.
+There is **no fallback** to a body field — a fallback *is* the vulnerability,
+and a test reintroducing `userId ?? req.user.id` demonstrably lets one user
+create a hold owned by another.
 
 Design rules applied throughout:
 

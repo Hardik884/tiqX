@@ -6,6 +6,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { createApp } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
+import { accessTokenForUser } from './helpers/auth.js';
 import { cleanupSeedData, seedCustomer, seedShow } from './helpers/seed.js';
 
 let server: Server;
@@ -36,16 +37,28 @@ interface Attempt {
   json: HoldResponse;
 }
 
-function holdRequest(
+/**
+ * Builds one request. The token is minted up front, outside the returned
+ * closure, so that work does not happen inside the concurrent burst and skew
+ * what the burst is measuring.
+ */
+async function holdRequest(
   eventId: string,
-  body: unknown,
+  body: { userId: string } & Record<string, unknown>,
   idempotencyKey: string,
-): () => Promise<Attempt> {
+): Promise<() => Promise<Attempt>> {
+  const { userId, ...payload } = body;
+  const authorization = `Bearer ${await accessTokenForUser(userId)}`;
+
   return async () => {
     const response = await fetch(`${baseUrl}/api/v1/events/${eventId}/holds`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
-      body: JSON.stringify(body),
+      headers: {
+        'content-type': 'application/json',
+        authorization,
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify(payload),
     });
     return { status: response.status, json: (await response.json()) as HoldResponse };
   };
@@ -95,7 +108,7 @@ describe('concurrent duplicate requests (same idempotency key)', () => {
     const body = { userId, showSeatIds: seatIds, ttlSeconds: 600 };
 
     const results = await runConcurrently(
-      Array.from({ length: ATTEMPTS }, () => holdRequest(eventId, body, key)),
+      await Promise.all(Array.from({ length: ATTEMPTS }, () => holdRequest(eventId, body, key))),
     );
 
     // Every caller gets the same successful answer: one did the work, the rest
@@ -144,7 +157,9 @@ describe('concurrent distinct requests (different idempotency keys)', () => {
     // Same user, same seats, same ttl - but a distinct key each time, so these
     // are 50 different logical requests rather than 50 retries of one.
     const results = await runConcurrently(
-      Array.from({ length: ATTEMPTS }, () => holdRequest(eventId, body, randomUUID())),
+      await Promise.all(
+        Array.from({ length: ATTEMPTS }, () => holdRequest(eventId, body, randomUUID())),
+      ),
     );
 
     const created = results.filter((result) => result.status === 201);
@@ -173,8 +188,10 @@ describe('concurrent distinct requests (different idempotency keys)', () => {
 
     // One request per seat, each with its own key: no contention, no dedup.
     const results = await runConcurrently(
-      seats.map((seat) =>
-        holdRequest(eventId, { userId, showSeatIds: [seat.id], ttlSeconds: 600 }, randomUUID()),
+      await Promise.all(
+        seats.map((seat) =>
+          holdRequest(eventId, { userId, showSeatIds: [seat.id], ttlSeconds: 600 }, randomUUID()),
+        ),
       ),
     );
 

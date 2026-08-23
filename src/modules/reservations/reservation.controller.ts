@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 
 import { BadRequestError } from '../../errors/app-error.js';
+import { requireUser } from '../../middleware/authenticate.js';
 import { hashHoldRequest } from '../idempotency/idempotency.hash.js';
 import { IDEMPOTENCY_HEADER, idempotencyKeySchema } from '../idempotency/idempotency.schema.js';
 import { runIdempotently } from '../idempotency/idempotency.service.js';
@@ -61,9 +62,11 @@ function readIdempotencyKey(req: Request): string {
  * reservation to the idempotency wrapper, which owns the transaction that the
  * hold and the stored response both commit in.
  *
- * userId comes from the body for now and will come from the authenticated
- * principal once authentication exists. It already scopes the idempotency key,
- * so that change will not alter the storage model.
+ * The owner of the hold is `req.user.id` and can be nothing else. It is read
+ * once, here, and flows into three places that must all agree: the hold's
+ * user_id, the idempotency key's scope, and the request hash. Because the
+ * schema is strict and carries no userId field, there is no other value in the
+ * request that could reach any of them.
  */
 export async function createHoldHandler(req: Request, res: Response): Promise<void> {
   const params = holdParamsSchema.safeParse(req.params);
@@ -80,16 +83,20 @@ export async function createHoldHandler(req: Request, res: Response): Promise<vo
     throw new BadRequestError('Invalid hold payload', toFieldErrors(body.error.issues));
   }
 
+  const { id: userId } = requireUser(req);
+
   const input = {
     eventId: params.data.eventId,
-    userId: body.data.userId,
+    userId,
     showSeatIds: body.data.showSeatIds,
     ttlSeconds: body.data.ttlSeconds,
   };
 
   const outcome = await runIdempotently<HoldResponseBody>(
     {
-      userId: input.userId,
+      // Scoped to the authenticated user, so one caller's key can never reach
+      // another caller's stored response.
+      userId,
       key: idempotencyKey,
       requestHash: hashHoldRequest(input),
       successStatus: 201,

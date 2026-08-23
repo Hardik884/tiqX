@@ -36,3 +36,22 @@ export class ConflictError extends AppError {
     super(message, 409, 'CONFLICT', details);
   }
 }
+
+/**
+ * 401. The request has no usable identity.
+ *
+ * `code` is overridable so the login endpoint can answer with one deliberately
+ * uninformative code for every kind of credential failure.
+ */
+export class UnauthorizedError extends AppError {
+  constructor(message = 'Authentication required', code = 'UNAUTHORIZED', details?: unknown) {
+    super(message, 401, code, details);
+  }
+}
+
+/** 403. The caller is known, but not permitted to do this. */
+export class ForbiddenError extends AppError {
+  constructor(message = 'Insufficient permissions', details?: unknown) {
+    super(message, 403, 'FORBIDDEN', details);
+  }
+}

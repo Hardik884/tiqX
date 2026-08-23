@@ -27,10 +27,12 @@
   "homepage": "https://github.com/Hardik884/tiqX#readme",
   "private": "true",
   "dependencies": {
+    "@node-rs/argon2": "^2.1.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "helmet": "^8.3.0",
+    "jose": "^6.2.10",
     "pg": "^8.23.0",
     "zod": "^4.4.3"
   },
