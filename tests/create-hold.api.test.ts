@@ -40,13 +40,22 @@ interface HoldResponse {
   error?: { code: string; message: string; details?: unknown };
 }
 
+/**
+ * Sends a hold request with a fresh Idempotency-Key by default, so each call is
+ * a distinct logical request. Pass `idempotencyKey` to retry one deliberately,
+ * or null to omit the header.
+ */
 async function postHold(
   eventId: string,
   body: unknown,
+  idempotencyKey: string | null = randomUUID(),
 ): Promise<{ status: number; json: HoldResponse }> {
   const response = await fetch(`${baseUrl}/api/v1/events/${eventId}/holds`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(idempotencyKey === null ? {} : { 'idempotency-key': idempotencyKey }),
+    },
     body: JSON.stringify(body),
   });
   return { status: response.status, json: (await response.json()) as HoldResponse };

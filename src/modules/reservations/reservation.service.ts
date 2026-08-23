@@ -1,3 +1,5 @@
+import type { PoolClient } from 'pg';
+
 import { withTransaction } from '../../db/pool.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/app-error.js';
 import type { CreateHoldInput, CreateHoldResult, UnavailableSeat } from './reservation-hold.types.js';
@@ -61,82 +63,93 @@ function describeUnavailable(seats: readonly UnavailableSeat[]): string {
  * held and others are not: concurrent readers see either the state before the
  * request or the state after it.
  */
-export async function createHold(input: CreateHoldInput): Promise<CreateHoldResult> {
+export async function createHoldInTransaction(
+  client: PoolClient,
+  input: CreateHoldInput,
+): Promise<CreateHoldResult> {
   const showSeatIds = sortSeatIds(input.showSeatIds);
 
-  return withTransaction(async (client) => {
-    if (!(await eventExists(client, input.eventId))) {
-      throw new NotFoundError('Event not found');
+  if (!(await eventExists(client, input.eventId))) {
+    throw new NotFoundError('Event not found');
+  }
+
+  // Checked in-transaction rather than trusted from the request. Until
+  // authentication exists this is the only thing standing between a typo and
+  // a hold owned by nobody; the foreign key would catch it too, but a clear
+  // 404 beats a constraint violation surfacing as a 500.
+  if (!(await userExists(client, input.userId))) {
+    throw new NotFoundError('User not found');
+  }
+
+  // From here on the requested seats are locked: no other transaction can
+  // decide anything about them until this one ends.
+  const locked = await lockEventSeats(client, input.eventId, showSeatIds);
+
+  if (locked.length !== showSeatIds.length) {
+    const returned = new Set(locked.map((seat) => seat.id));
+    const missing = showSeatIds.filter((id) => !returned.has(id));
+    const existing = new Set(await findExistingSeatIds(client, missing));
+
+    // A seat that exists but did not come back belongs to a different event:
+    // a bad selection (400), not a missing resource (404).
+    const wrongEvent = missing.filter((id) => existing.has(id));
+    if (wrongEvent.length > 0) {
+      throw new BadRequestError('Requested seats do not belong to this event', {
+        showSeatIds: wrongEvent,
+      });
     }
 
-    // Checked in-transaction rather than trusted from the request. Until
-    // authentication exists this is the only thing standing between a typo and
-    // a hold owned by nobody; the foreign key would catch it too, but a clear
-    // 404 beats a constraint violation surfacing as a 500.
-    if (!(await userExists(client, input.userId))) {
-      throw new NotFoundError('User not found');
-    }
+    throw new NotFoundError('Requested seats do not exist', { showSeatIds: missing });
+  }
 
-    // From here on the requested seats are locked: no other transaction can
-    // decide anything about them until this one ends.
-    const locked = await lockEventSeats(client, input.eventId, showSeatIds);
+  // Reclaim anything whose time is up. Both halves happen here, under the
+  // seat locks, so the expired hold and the freed seat become visible to
+  // everyone else at the same instant - at COMMIT.
+  await expireLapsedHoldsForSeats(client, showSeatIds);
+  await releaseSeatsWithoutLiveHold(client, showSeatIds);
 
-    if (locked.length !== showSeatIds.length) {
-      const returned = new Set(locked.map((seat) => seat.id));
-      const missing = showSeatIds.filter((id) => !returned.has(id));
-      const existing = new Set(await findExistingSeatIds(client, missing));
+  const availability = await readSeatAvailability(client, showSeatIds);
+  const unavailable: UnavailableSeat[] = availability
+    .filter((seat) => seat.status !== 'available' || seat.liveHold)
+    .map((seat) => ({
+      showSeatId: seat.id,
+      reason: seat.status === 'booked' ? 'booked' : 'held',
+    }));
 
-      // A seat that exists but did not come back belongs to a different event:
-      // a bad selection (400), not a missing resource (404).
-      const wrongEvent = missing.filter((id) => existing.has(id));
-      if (wrongEvent.length > 0) {
-        throw new BadRequestError('Requested seats do not belong to this event', {
-          showSeatIds: wrongEvent,
-        });
-      }
+  // All-or-nothing: one taken seat rejects the entire selection.
+  if (unavailable.length > 0) {
+    throw new ConflictError(describeUnavailable(unavailable), { unavailableSeats: unavailable });
+  }
 
-      throw new NotFoundError('Requested seats do not exist', { showSeatIds: missing });
-    }
+  const hold = await insertHold(client, input.eventId, input.userId, input.ttlSeconds);
 
-    // Reclaim anything whose time is up. Both halves happen here, under the
-    // seat locks, so the expired hold and the freed seat become visible to
-    // everyone else at the same instant - at COMMIT.
-    await expireLapsedHoldsForSeats(client, showSeatIds);
-    await releaseSeatsWithoutLiveHold(client, showSeatIds);
+  const linked = await insertHoldSeats(client, hold.id, showSeatIds);
+  if (linked !== showSeatIds.length) {
+    // Unreachable unless the insert silently dropped rows; refuse to commit a
+    // hold that does not cover everything the customer asked for.
+    throw new Error(`Expected ${showSeatIds.length} hold seat rows, inserted ${linked}`);
+  }
 
-    const availability = await readSeatAvailability(client, showSeatIds);
-    const unavailable: UnavailableSeat[] = availability
-      .filter((seat) => seat.status !== 'available' || seat.liveHold)
-      .map((seat) => ({
-        showSeatId: seat.id,
-        reason: seat.status === 'booked' ? 'booked' : 'held',
-      }));
+  const heldCount = await markSeatsHeld(client, showSeatIds);
+  if (heldCount !== showSeatIds.length) {
+    throw new Error(`Expected to hold ${showSeatIds.length} seats, updated ${heldCount}`);
+  }
 
-    // All-or-nothing: one taken seat rejects the entire selection.
-    if (unavailable.length > 0) {
-      throw new ConflictError(describeUnavailable(unavailable), { unavailableSeats: unavailable });
-    }
+  return {
+    holdId: hold.id,
+    eventId: input.eventId,
+    showSeatIds,
+    status: 'active',
+    expiresAt: hold.expiresAt,
+  };
+}
 
-    const hold = await insertHold(client, input.eventId, input.userId, input.ttlSeconds);
-
-    const linked = await insertHoldSeats(client, hold.id, showSeatIds);
-    if (linked !== showSeatIds.length) {
-      // Unreachable unless the insert silently dropped rows; refuse to commit a
-      // hold that does not cover everything the customer asked for.
-      throw new Error(`Expected ${showSeatIds.length} hold seat rows, inserted ${linked}`);
-    }
-
-    const heldCount = await markSeatsHeld(client, showSeatIds);
-    if (heldCount !== showSeatIds.length) {
-      throw new Error(`Expected to hold ${showSeatIds.length} seats, updated ${heldCount}`);
-    }
-
-    return {
-      holdId: hold.id,
-      eventId: input.eventId,
-      showSeatIds,
-      status: 'active',
-      expiresAt: hold.expiresAt,
-    };
-  });
+/**
+ * Standalone entry point: runs {@link createHoldInTransaction} in a transaction
+ * of its own. Callers that need the hold to commit together with other work -
+ * the idempotency record, for instance - pass their own client to
+ * `createHoldInTransaction` instead, so everything shares one COMMIT.
+ */
+export async function createHold(input: CreateHoldInput): Promise<CreateHoldResult> {
+  return withTransaction((client) => createHoldInTransaction(client, input));
 }

@@ -89,6 +89,7 @@ migrations/                versioned schema migrations (node-pg-migrate)
 | `show_seats`  | per-event inventory state of each physical seat      |
 | `reservation_holds` | a customer's temporary claim on seats of one event |
 | `reservation_hold_seats` | which show seats a hold covers                |
+| `idempotency_keys` | stored responses that make a retried write safe to repeat |
 
 ### Physical seats vs. show seats
 
@@ -217,6 +218,8 @@ reservation service's job.
   "status": "active", "expiresAt": "2026-08-23T11:40:00.000Z" }
 ```
 
+`Idempotency-Key` is **required** — see [Idempotency](#idempotency) below.
+
 `userId` is read from the body **temporarily**, because authentication does not
 exist yet. It becomes the authenticated principal later and must not be treated
 as an authorisation signal in the meantime.
@@ -293,6 +296,94 @@ mark the old hold expired  ->  free the seat  ->  acquire it for the new hold
 Correctness therefore does not depend on a background worker; the future worker
 is only a tidy-up for rows nobody asked for. A hold that is still alive by the
 database's clock is never touched.
+
+## Idempotency
+
+Every hold request must carry a header:
+
+```
+Idempotency-Key: <printable ASCII, 1-255 chars>
+```
+
+Missing, empty, oversized, repeated or malformed keys are rejected with `400`.
+The server never invents a key: one it generated would differ on every retry,
+defeating the point.
+
+Retrying the same logical request with the same key returns the **stored
+response** — same status, same body, same `holdId`, same `expiresAt` — and runs
+no reservation logic at all.
+
+### What makes two requests "the same"
+
+Not the bytes. A SHA-256 digest is taken over a canonical form of the fields
+that change what the operation does:
+
+```
+sha256({ v:1, userId, eventId, showSeatIds sorted, ttlSeconds })
+```
+
+Key order, whitespace and seat order are presentation, so `["A13","A12"]` and
+`["A12","A13"]` are the same request and replay correctly. A key reused with a
+different selection, ttl or event is refused with `409` and
+`details.reason = "idempotency_key_reuse"` — answering it with the old response
+would be worse than refusing.
+
+Keys are scoped `UNIQUE (user_id, key)`, never globally. Two customers may pick
+the same string without colliding, and one customer's key can never read
+another's stored response.
+
+### One transaction
+
+The claim, the hold and the stored response all commit together:
+
+```
+BEGIN
+  INSERT INTO idempotency_keys (...) VALUES (..., 'processing')
+    ON CONFLICT (user_id, key) DO NOTHING RETURNING id
+  ...the whole reservation, on this same client...
+  UPDATE idempotency_keys SET status='completed', response_status, response_body
+COMMIT
+```
+
+Claiming the key in one transaction and saving the result in another would
+leave a window where the hold is durable but the record is not — a crash there
+and the retry creates a second hold. Here there is no window.
+
+### Concurrent duplicates
+
+The unique index *is* the lock. A second request carrying the same key does not
+fail fast and does not race ahead — its insert **waits** on the index until the
+first transaction ends, then reacts to what actually happened:
+
+| First transaction | Second request |
+| ----------------- | --------------- |
+| committed         | insert returns no row → read the record → replay its response |
+| rolled back       | insert succeeds → take the key over and do the work |
+
+Measured directly: with the first transaction held open 3s, the second insert
+blocked ~2s and then read `completed`. Because the coordination lives in the
+index, it holds across processes — two API instances behave exactly like two
+connections from one. An in-memory map could not make that claim.
+
+`processing` is therefore a state a row only occupies *inside* the transaction
+that owns it; any committed row is already `completed`. A committed
+`processing` row would mean an attempt died in a way this design does not
+produce, so it is answered with `409 idempotency_key_in_flight` rather than a
+guess.
+
+### Failure semantics
+
+**A failed request stores nothing.** The throw rolls back the claim along with
+the hold, and the key is free again. So:
+
+- a retry after a failure is a genuine new attempt, not a replayed error;
+- a failure can never be stored as a success that never happened.
+
+The tradeoff is deliberate: a `409` is not replayed. Persisting it would mean
+committing the record in a separate transaction from the rolled-back hold —
+exactly the split this design exists to avoid. It is also friendlier: a seat
+that was taken a moment ago may since have been released, and the retry should
+be allowed to get it.
 
 Design rules applied throughout:
 
