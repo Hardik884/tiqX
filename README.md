@@ -2,12 +2,11 @@
 
 Backend foundation: TypeScript + Express 5 + PostgreSQL.
 
-This repository currently contains **only** the backend and database
-foundation. Temporary seat holds exist as a data model
-(`reservation_holds`); the reservation API, expiry sweeping and the
-concurrency rules that go with it do not. Booking, waitlists, payments, email,
-QR codes, Redis, WebSockets and background workers are intentionally not
-implemented yet.
+This repository currently contains the backend foundation, the database
+schema, and the transactional reservation primitive that hands out temporary
+seat holds. Booking, payments, waitlists, hold-expiry sweeping, email, QR
+codes, Redis, WebSockets, background workers and authentication are
+intentionally not implemented yet.
 
 ## Requirements
 
@@ -57,6 +56,7 @@ npm start
 | `GET`  | `/health`       | Liveness. Confirms the process is serving requests. |
 | `GET`  | `/health/ready` | Readiness. Also verifies PostgreSQL is reachable.   |
 | `POST` | `/api/v1/events`| Create an event and its initial seat inventory.     |
+| `POST` | `/api/v1/events/:eventId/holds` | Temporarily hold seats for a customer. |
 
 Neither endpoint returns configuration, credentials or connection details.
 `/health/ready` responds `503` with `{"dependencies":{"database":"down"}}` when
@@ -203,6 +203,96 @@ this schema has no `hold_id`/`user_id` column on `show_seats` and no partial
 unique index forbidding two active holds on one seat. The latter would also
 destroy history: past holds must keep their seat lists. Concurrency is the
 reservation service's job.
+
+## Placing a hold
+
+`POST /api/v1/events/:eventId/holds` holds a seat selection for one customer.
+
+```jsonc
+// request
+{ "userId": "<uuid>", "showSeatIds": ["<uuid>", "<uuid>"], "ttlSeconds": 600 }
+
+// 201 response
+{ "holdId": "<uuid>", "eventId": "<uuid>", "showSeatIds": ["<uuid>", "<uuid>"],
+  "status": "active", "expiresAt": "2026-08-23T11:40:00.000Z" }
+```
+
+`userId` is read from the body **temporarily**, because authentication does not
+exist yet. It becomes the authenticated principal later and must not be treated
+as an authorisation signal in the meantime.
+
+Bounds: 1–10 seats, no duplicates, `ttlSeconds` 60–900 (default 600). The client
+supplies a *duration*; `expires_at` is computed by PostgreSQL from its own clock,
+so a wrong app-server clock cannot mint a long-lived hold.
+
+| Status | When                                                          |
+| ------ | ------------------------------------------------------------- |
+| `201`  | every requested seat was held                                  |
+| `400`  | invalid payload, or a seat belonging to a different event      |
+| `404`  | event, user, or seat does not exist                            |
+| `409`  | a requested seat is booked or under a live hold                |
+| `500`  | unexpected failure; the client sees no PostgreSQL detail       |
+
+### All or nothing
+
+If any one seat is unavailable, the whole request fails and *nothing* changes —
+no hold row, no links, no seat flipped. That is not compensating logic, it is
+the transaction: every rejection throws, `withTransaction` rolls back, and the
+database discards the attempt.
+
+```
+request A12, A13, A14 with A13 taken  ->  409, and A12/A14 stay available
+```
+
+### How concurrency is handled
+
+One transaction, and PostgreSQL row locks as the only arbiter — no application
+mutex, no Redis, no advisory locks:
+
+```
+BEGIN
+  event exists?  user exists?
+  SELECT ... FROM show_seats
+   WHERE id = ANY($1) AND event_id = $2
+   ORDER BY id
+   FOR UPDATE                  <- competing requests serialise here
+  every requested seat came back? (else 404 / 400)
+  expire lapsed holds on these seats, and free their seats
+  re-read availability; any seat still taken -> 409
+  INSERT reservation_holds (expires_at = now() + ttl)
+  INSERT reservation_hold_seats
+  UPDATE show_seats SET status = 'held'
+COMMIT
+```
+
+Three things make this safe:
+
+- **`FOR UPDATE`** blocks every other transaction that wants the same seat until
+  this one ends. A blocked transaction re-reads the row *after* the lock is
+  granted, so it observes the winner's result rather than the stale value it
+  would have read before waiting.
+- **`ORDER BY id`** fixes the order locks are taken in, so overlapping requests
+  queue in the same direction and cannot form a lock cycle. `EXPLAIN` confirms
+  the plan places `LockRows` above `Sort` — rows are locked in sorted order, not
+  locked and then sorted. The expiry step locks its hold rows through an ordered
+  `SELECT ... FOR UPDATE` sub-select for the same reason, since `UPDATE` cannot
+  take an `ORDER BY`.
+- **`event_id` in the locking query** is the ownership check, so a client cannot
+  reach a seat belonging to another event.
+
+### Reclaiming a lapsed hold
+
+Nothing rewrites a hold when its `expires_at` passes, so a lapsed hold still
+reads `active`. Whoever next wants the seat performs the transition, inside the
+same transaction and under the same seat locks:
+
+```
+mark the old hold expired  ->  free the seat  ->  acquire it for the new hold
+```
+
+Correctness therefore does not depend on a background worker; the future worker
+is only a tidy-up for rows nobody asked for. A hold that is still alive by the
+database's clock is never touched.
 
 Design rules applied throughout:
 

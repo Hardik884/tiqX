@@ -15,10 +15,9 @@ Conventions (see `health/` for the working example):
   <module>.types.ts       shared types
 ```
 
-`events`, `venues` and `seats` are partially implemented: event creation and
-the per-event seat inventory derived from a venue's seat map. `reservations`
-currently contains only the domain types for the hold tables — no routes,
-service or repository yet. Folders that hold only a `.gitkeep` are placeholders
+`events`, `venues`, `seats` and `reservations` are partially implemented: event
+creation with its derived seat inventory, and the transactional hold operation
+that temporarily reserves seats. Folders that hold only a `.gitkeep` are placeholders
 and intentionally contain no code yet.
 
 | Module          | Planned responsibility                          |

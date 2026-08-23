@@ -31,3 +31,32 @@ export interface ReservationHoldSeat {
   showSeatId: string;
   createdAt: Date;
 }
+
+/**
+ * A seat that could not be acquired, and why. Returned to the client so it can
+ * show which specific seats to re-pick.
+ */
+export interface UnavailableSeat {
+  showSeatId: string;
+  reason: 'booked' | 'held';
+}
+
+export interface CreateHoldInput {
+  eventId: string;
+  /**
+   * TEMPORARY: supplied by the client until authentication exists, at which
+   * point it comes from the authenticated principal instead. Never trust it
+   * for authorisation.
+   */
+  userId: string;
+  showSeatIds: readonly string[];
+  ttlSeconds: number;
+}
+
+export interface CreateHoldResult {
+  holdId: string;
+  eventId: string;
+  showSeatIds: string[];
+  status: ReservationHoldStatus;
+  expiresAt: Date;
+}

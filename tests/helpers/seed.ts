@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { query } from '../../src/db/pool.js';
+import { createEvent } from '../../src/modules/events/event.service.js';
 
 interface IdRow {
   id: string;
@@ -84,4 +85,102 @@ export async function cleanupSeedData(): Promise<void> {
   await query('DELETE FROM venue_seats WHERE venue_id = ANY($1::uuid[])', [createdVenueIds]);
   await query('DELETE FROM venues WHERE id = ANY($1::uuid[])', [createdVenueIds]);
   await query('DELETE FROM users WHERE id = ANY($1::uuid[])', [createdUserIds]);
+}
+
+export interface SeededSeat {
+  id: string;
+  label: string;
+}
+
+export interface SeededShow {
+  eventId: string;
+  venueId: string;
+  organiserId: string;
+  seats: SeededSeat[];
+}
+
+/**
+ * Creates an event whose inventory is A<firstSeatNumber>.., e.g. A12..A14, and
+ * returns its show seats in seat order. Everything it creates is tracked for
+ * cleanup.
+ */
+export async function seedShow(seatCount: number, firstSeatNumber = 12): Promise<SeededShow> {
+  const organiserId = await seedOrganiser();
+  const { venueId } = await seedVenue(seatCount, 'A', firstSeatNumber);
+
+  const { event } = await createEvent({
+    organiserId,
+    venueId,
+    title: `Hold Test ${randomUUID()}`,
+    eventType: 'concert',
+    startsAt: new Date('2030-01-01T18:00:00.000Z'),
+    endsAt: new Date('2030-01-01T20:00:00.000Z'),
+  });
+  trackEvent(event.id);
+
+  const seats = await query<SeededSeat>(
+    `SELECT ss.id, vs.row_label || vs.seat_number AS label
+     FROM show_seats ss
+     JOIN venue_seats vs ON vs.id = ss.venue_seat_id
+     WHERE ss.event_id = $1
+     ORDER BY vs.seat_number`,
+    [event.id],
+  );
+
+  return { eventId: event.id, venueId, organiserId, seats: seats.rows };
+}
+
+/**
+ * Reproduces the state a lapsed hold leaves behind: an `active` hold whose
+ * `expires_at` is already in the past, with its seats still flagged `held`.
+ * Nothing rewrites those rows on its own, which is exactly the situation the
+ * reservation service has to reclaim.
+ */
+export async function seedLapsedHold(
+  eventId: string,
+  userId: string,
+  showSeatIds: readonly string[],
+  secondsAgo = 60,
+): Promise<string> {
+  const hold = await query<IdRow>(
+    `INSERT INTO reservation_holds (event_id, user_id, status, expires_at)
+     VALUES ($1, $2, 'active', now() - make_interval(secs => $3::double precision))
+     RETURNING id`,
+    [eventId, userId, secondsAgo],
+  );
+  const holdId = hold.rows[0]!.id;
+
+  await query(
+    `INSERT INTO reservation_hold_seats (hold_id, show_seat_id)
+     SELECT $1, show_seat_id FROM unnest($2::uuid[]) AS show_seat_id`,
+    [holdId, showSeatIds],
+  );
+  await query("UPDATE show_seats SET status = 'held' WHERE id = ANY($1::uuid[])", [showSeatIds]);
+
+  return holdId;
+}
+
+/** An `active` hold that is still alive, with its seats flagged `held`. */
+export async function seedLiveHold(
+  eventId: string,
+  userId: string,
+  showSeatIds: readonly string[],
+  ttlSeconds = 600,
+): Promise<string> {
+  const hold = await query<IdRow>(
+    `INSERT INTO reservation_holds (event_id, user_id, status, expires_at)
+     VALUES ($1, $2, 'active', now() + make_interval(secs => $3::double precision))
+     RETURNING id`,
+    [eventId, userId, ttlSeconds],
+  );
+  const holdId = hold.rows[0]!.id;
+
+  await query(
+    `INSERT INTO reservation_hold_seats (hold_id, show_seat_id)
+     SELECT $1, show_seat_id FROM unnest($2::uuid[]) AS show_seat_id`,
+    [holdId, showSeatIds],
+  );
+  await query("UPDATE show_seats SET status = 'held' WHERE id = ANY($1::uuid[])", [showSeatIds]);
+
+  return holdId;
 }
