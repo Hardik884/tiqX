@@ -1,0 +1,35 @@
+# Modules
+
+Each feature lives in its own folder and owns its routes, controllers, services
+and data access. A module is wired into the API by mounting its router in
+`src/routes/index.ts`.
+
+Conventions (see `health/` for the working example):
+
+```
+<module>/
+  <module>.routes.ts      HTTP routes
+  <module>.controller.ts  request/response handling
+  <module>.service.ts     business rules
+  <module>.repository.ts  SQL, using src/db/pool
+  <module>.types.ts       shared types
+```
+
+`events`, `venues` and `seats` are partially implemented: event creation and
+the per-event seat inventory derived from a venue's seat map. `reservations`
+currently contains only the domain types for the hold tables — no routes,
+service or repository yet. Folders that hold only a `.gitkeep` are placeholders
+and intentionally contain no code yet.
+
+| Module          | Planned responsibility                          |
+| --------------- | ----------------------------------------------- |
+| `auth`          | registration, login, tokens, guards             |
+| `users`         | profile management                              |
+| `venues`        | venues and their physical seat layout           |
+| `events`        | movies and concerts scheduled at a venue        |
+| `seats`         | per-event seat inventory (`show_seats`)         |
+| `reservations`  | temporary seat holds (`reservation_holds`)      |
+| `bookings`      | confirmed bookings and payment state            |
+| `waitlist`      | queueing for sold-out events                    |
+| `notifications` | email and in-app notifications                  |
+| `analytics`     | reporting for organisers and admins             |
