@@ -45,6 +45,7 @@ npm start
 | `npm run migrate:up`     | Apply pending migrations                             |
 | `npm run migrate:down`   | Roll back the most recent migration                  |
 | `npm run migrate:create` | Scaffold a new TypeScript migration                  |
+| `npm test`               | Run the integration test suite (needs a migrated DB)  |
 
 ## Endpoints
 
@@ -52,6 +53,7 @@ npm start
 | ------ | --------------- | -------------------------------------------------- |
 | `GET`  | `/health`       | Liveness. Confirms the process is serving requests. |
 | `GET`  | `/health/ready` | Readiness. Also verifies PostgreSQL is reachable.   |
+| `POST` | `/api/v1/events`| Create an event and its initial seat inventory.     |
 
 Neither endpoint returns configuration, credentials or connection details.
 `/health/ready` responds `503` with `{"dependencies":{"database":"down"}}` when
@@ -81,6 +83,29 @@ migrations/                versioned schema migrations (node-pg-migrate)
 | `venues`      | physical venues                                      |
 | `venue_seats` | the physical seat layout of a venue                  |
 | `events`      | movies and concerts scheduled at a venue             |
+| `show_seats`  | per-event inventory state of each physical seat      |
+
+### Physical seats vs. show seats
+
+`venue_seats` describes the seat that physically exists in a building.
+`show_seats` describes what that seat is doing for **one** event, so the same
+physical seat can be `booked` for one screening and `available` for the next:
+
+```
+venue A1 ──┬── event 1 / A1  available
+           └── event 2 / A1  booked
+```
+
+`UNIQUE (event_id, venue_seat_id)` makes it impossible to list the same
+physical seat twice in one event's inventory.
+
+Who is holding or has bought a seat is deliberately *not* stored on
+`show_seats`. Temporary holds and confirmed purchases become their own entities
+(`reservation_holds`, `bookings` and their join tables) in a later step.
+
+Creating an event and creating its inventory happen in a single transaction, in
+`src/modules/events/event.service.ts`, so an event can never be persisted
+without its seat map.
 
 Design rules applied throughout:
 
@@ -94,3 +119,16 @@ Design rules applied throughout:
   `(venue_id, row_label, seat_number)`
 - indexes on foreign keys and on the columns real queries filter by
 - `updated_at` maintained by a database trigger, not by application code
+
+## Tests
+
+The suite is integration-level: it exercises the real schema, so it needs a
+running PostgreSQL with migrations applied.
+
+```bash
+cp .env.example .env   # DATABASE_URL must point at a database you can write to
+npm run migrate:up
+npm test
+```
+
+Tests create their own venues and organisers and delete them afterwards.

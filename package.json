@@ -11,7 +11,8 @@
     "migrate": "tsx node_modules/node-pg-migrate/bin/node-pg-migrate.js",
     "migrate:up": "npm run migrate -- up",
     "migrate:down": "npm run migrate -- down",
-    "migrate:create": "npm run migrate -- create --migration-file-language ts"
+    "migrate:create": "npm run migrate -- create --migration-file-language ts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts"
   },
   "repository": {
     "type": "git",
