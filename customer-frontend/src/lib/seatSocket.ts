@@ -27,9 +27,35 @@ class SeatSocket {
   private reconnectTimer: number | null = null;
   private connectionListeners = new Set<(connected: boolean) => void>();
 
+  /**
+   * Where the real-time server actually lives.
+   *
+   * `VITE_WS_URL`, when set, wins outright - the explicit override for any
+   * deployment. Otherwise: on localhost this is same-origin (Vite's dev
+   * server proxies `/ws` to the local API with `ws: true`), and everywhere
+   * else it falls back to the deployed backend directly.
+   *
+   * This does NOT go through the Vercel rewrite for `/ws`: a `vercel.json`
+   * rewrite is an HTTP-layer proxy, and WebSocket upgrade requests routed
+   * through it were the actual cause of the "reconnecting" loop - the
+   * upgrade never completed, so the client dropped and retried forever
+   * without ever receiving a live seat update. Connecting straight to the
+   * backend's own origin needs no CORS handling either: the WebSocket
+   * protocol has no preflight, only same-origin XHR/fetch does.
+   */
   private url(): string {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${window.location.host}/ws`;
+    const override = import.meta.env.VITE_WS_URL;
+    if (typeof override === 'string' && override.length > 0) {
+      return override;
+    }
+
+    const { hostname, protocol, host } = window.location;
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      const proto = protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${proto}//${host}/ws`;
+    }
+
+    return 'wss://tiqx.onrender.com/ws';
   }
 
   connect(): void {
