@@ -63,7 +63,12 @@ export function bearer(token: string): { authorization: string } {
 
 /** Removes users created by {@link seedAuthedUser}, cascading their tokens. */
 export async function cleanupAuthedUsers(): Promise<void> {
-  // Bookings hold a RESTRICT reference to their user, so they go first.
+  // Tickets hold a RESTRICT reference to their booking, so they go first, then
+  // bookings, which hold a RESTRICT reference to their user.
+  await query(
+    'DELETE FROM tickets WHERE booking_id IN (SELECT id FROM bookings WHERE user_id = ANY($1::uuid[]))',
+    [createdUserIds],
+  );
   await query('DELETE FROM bookings WHERE user_id = ANY($1::uuid[])', [createdUserIds]);
   await query('DELETE FROM users WHERE id = ANY($1::uuid[])', [createdUserIds]);
   createdUserIds.length = 0;

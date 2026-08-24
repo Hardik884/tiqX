@@ -110,6 +110,12 @@ const envSchema = z.object({
   RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().positive().default(3_600),
   RATE_LIMIT_REFRESH_MAX: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_REFRESH_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
+  // Generous enough for one scanner working a queue at the door, tight enough
+  // that one compromised or misused organiser/admin credential cannot
+  // enumerate ticket ids at speed. Keyed per user, not per IP - see
+  // rate-limit.ts.
+  RATE_LIMIT_TICKET_VERIFY_MAX: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_TICKET_VERIFY_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
 
   // ---------------------------------------------------------------------------
   // Hold expiration worker
@@ -183,6 +189,11 @@ export const config = {
       name: 'refresh',
       max: env.RATE_LIMIT_REFRESH_MAX,
       windowSeconds: env.RATE_LIMIT_REFRESH_WINDOW_SECONDS,
+    },
+    ticketVerify: {
+      name: 'ticket-verify',
+      max: env.RATE_LIMIT_TICKET_VERIFY_MAX,
+      windowSeconds: env.RATE_LIMIT_TICKET_VERIFY_WINDOW_SECONDS,
     },
   },
   expiration: {

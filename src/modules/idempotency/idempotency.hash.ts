@@ -88,3 +88,28 @@ export function hashCancelRequest(fingerprint: CancelRequestFingerprint): string
 
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
+
+/**
+ * The fields that identify one ticket-issuance request.
+ *
+ * No `role` here: role decides *authorisation*, checked fresh from the
+ * database inside the transaction, not what makes two requests the same
+ * request. A caller whose role changed between the original call and a retry
+ * still means "issue tickets for this booking" - the same request either way.
+ */
+export interface IssueTicketsRequestFingerprint {
+  userId: string;
+  bookingId: string;
+}
+
+/** Versioned and tagged separately, so no two operations can share a digest. */
+export function hashIssueTicketsRequest(fingerprint: IssueTicketsRequestFingerprint): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: 'issue-tickets',
+    userId: fingerprint.userId,
+    bookingId: fingerprint.bookingId,
+  });
+
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}

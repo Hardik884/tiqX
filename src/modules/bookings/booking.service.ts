@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
+import { hasUsedTickets } from '../tickets/ticket.repository.js';
 import {
   applyBookingTotal,
   generateBookingReference,
@@ -247,6 +248,7 @@ function bookingNotFound(): NotFoundError {
  * the existing global order rather than contradicting it:
  *
  *     idempotency_keys  ->  bookings  ->  show_seats (by id)  ->  reservation_holds
+ *     idempotency_keys  ->  bookings  ->  tickets
  *
  * Confirmation takes seats then the hold, and never locks an existing `bookings`
  * row - it inserts one that no other transaction can yet see. So `bookings` and
@@ -254,6 +256,13 @@ function bookingNotFound(): NotFoundError {
  * possible. The only table both paths contend for is `show_seats`, and both
  * reach it in the same ascending-id order, which is what makes reservation,
  * expiration, confirmation and cancellation safe to run at once.
+ *
+ * Ticket issuance and verification (see ticket.service.ts) both lock this same
+ * `bookings` row first, before touching `tickets`, which is what serialises
+ * them against this function rather than racing it - the `hasUsedTickets`
+ * check below is read under that same lock. Neither ticket path ever locks
+ * `show_seats` or `reservation_holds`, so there is no cycle between the two
+ * global orders above; they only ever share the `bookings` row.
  *
  * WHERE A REFUND WOULD GO. Not here. This function must stay a pure PostgreSQL
  * transaction: it holds row locks on inventory that other customers are queuing
@@ -312,6 +321,27 @@ export async function cancelBookingInTransaction(
     });
     throw new ConflictError('This booking can no longer be cancelled', {
       reason: 'BOOKING_INVALID',
+    });
+  }
+
+  // A ticket that has already been used is proof someone was let in on it;
+  // undoing the sale afterwards would leave that entry unaccounted for. This
+  // is checked here, under the booking lock just taken above, which is the
+  // same lock ticket verification takes before marking a ticket used - so
+  // this can never race a verification that has not committed yet. Either
+  // this transaction is the one that finds the used ticket (verification
+  // already committed), or verification is still blocked behind this lock and
+  // cannot produce one until this transaction ends. See
+  // ticket.service.ts::verifyTicketInTransaction for the other half.
+  if (await hasUsedTickets(client, input.bookingId)) {
+    logger.warn('Rejected booking cancellation', {
+      requestId,
+      bookingId: input.bookingId,
+      eventId: booking.eventId,
+      reason: 'BOOKING_HAS_USED_TICKETS',
+    });
+    throw new ConflictError('This booking has a used ticket and can no longer be cancelled', {
+      reason: 'BOOKING_HAS_USED_TICKETS',
     });
   }
 

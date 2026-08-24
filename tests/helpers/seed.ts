@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-import { query } from '../../src/db/pool.js';
+import { query, withTransaction } from '../../src/db/pool.js';
+import { confirmHoldInTransaction } from '../../src/modules/bookings/booking.service.js';
 import { createEvent } from '../../src/modules/events/event.service.js';
+import { createHold } from '../../src/modules/reservations/reservation.service.js';
 
 interface IdRow {
   id: string;
@@ -80,7 +82,20 @@ export async function seedVenue(
  * venue seats those rows referenced.
  */
 export async function cleanupSeedData(): Promise<void> {
-  // Bookings first. Their user and event foreign keys are ON DELETE RESTRICT -
+  // Tickets first. Their booking and booking_seat foreign keys are ON DELETE
+  // RESTRICT - a ticket must not vanish with a cascade either - so a booking
+  // that has tickets cannot be deleted until they are gone.
+  await query(
+    `DELETE FROM tickets
+     WHERE booking_id IN (
+       SELECT id FROM bookings
+       WHERE user_id = ANY($1::uuid[])
+          OR event_id = ANY($2::uuid[])
+          OR event_id IN (SELECT id FROM events WHERE venue_id = ANY($3::uuid[]))
+     )`,
+    [createdUserIds, createdEventIds, createdVenueIds],
+  );
+  // Bookings next. Their user and event foreign keys are ON DELETE RESTRICT -
   // a financial record must not vanish with a cascade - so nothing below can be
   // removed while a booking still points at it. Deleting the booking takes its
   // booking_seats with it, which in turn releases the RESTRICT those rows hold
@@ -195,4 +210,55 @@ export async function seedLiveHold(
   await query("UPDATE show_seats SET status = 'held' WHERE id = ANY($1::uuid[])", [showSeatIds]);
 
   return holdId;
+}
+
+export interface SeededBooking {
+  eventId: string;
+  organiserId: string;
+  userId: string;
+  seatIds: string[];
+  bookingId: string;
+}
+
+/**
+ * Seeds a priced show, holds every seat and confirms the booking directly
+ * through the service layer - no HTTP round trip, since the ticket suites this
+ * exists for are testing what happens *after* a booking exists, not
+ * confirmation itself.
+ */
+export async function seedConfirmedBooking(
+  seatCount: number,
+  price = '250.00',
+): Promise<SeededBooking> {
+  const organiserId = await seedOrganiser();
+  const { venueId } = await seedVenue(seatCount, 'A', 12);
+  const { event } = await createEvent({
+    organiserId,
+    venueId,
+    title: `Ticket Test ${randomUUID()}`,
+    eventType: 'concert',
+    startsAt: new Date('2030-01-01T18:00:00.000Z'),
+    endsAt: new Date('2030-01-01T20:00:00.000Z'),
+    pricing: { standard: price },
+  });
+  trackEvent(event.id);
+
+  const seats = await query<IdRow>(
+    'SELECT id FROM show_seats WHERE event_id = $1 ORDER BY id',
+    [event.id],
+  );
+  const seatIds = seats.rows.map((row) => row.id);
+
+  const userId = await seedCustomer();
+  const hold = await createHold({ eventId: event.id, userId, showSeatIds: seatIds, ttlSeconds: 600 });
+
+  const result = await withTransaction((client) =>
+    confirmHoldInTransaction(
+      client,
+      { userId, eventId: event.id, holdId: hold.holdId },
+      undefined,
+    ),
+  );
+
+  return { eventId: event.id, organiserId, userId, seatIds, bookingId: result.booking.id };
 }

@@ -67,14 +67,31 @@ function clientIp(req: Request): string {
  *     a memory-exhaustion vector, and no limiting at all. The authenticated
  *     user is not known either, because resolving the token is the work being
  *     protected. IP is bounded and is the axis abuse actually travels on.
+ *
+ *   ticket verification: the authenticated user.
+ *     Unlike the three above, this endpoint sits behind `requireAuth`, so a
+ *     principal already exists by the time the limiter runs - there is no
+ *     "becoming authenticated" problem to work around. The abuse this guards
+ *     against is a single organiser/admin credential being used to hammer or
+ *     enumerate ticket ids, which is an axis IP cannot see (venue staff on one
+ *     gate network share an address, and would otherwise share one bucket) and
+ *     the user id can: it is the actual unit the door-scanning role is granted
+ *     to.
  */
-export type IdentifierSource = 'ip' | 'email-and-ip';
+export type IdentifierSource = 'ip' | 'email-and-ip' | 'user';
 
 function resolveIdentifier(source: IdentifierSource, req: Request): string {
   const ip = clientIp(req);
 
   if (source === 'ip') {
     return identifierDigest(ip);
+  }
+
+  if (source === 'user') {
+    // Mounted behind `requireAuth`, so `req.user` is always present; digested
+    // like every other identifier so a leaked rate-limit key still reveals no
+    // user id.
+    return identifierDigest(req.user?.id ?? ip);
   }
 
   // Body may be anything; read defensively and normalise. An absent or
