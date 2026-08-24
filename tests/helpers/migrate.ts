@@ -16,11 +16,14 @@ const run = promisify(execFile);
  * count from the database with {@link stepsToRollBack}.
  */
 export async function migrate(direction: 'up' | 'down', steps?: number): Promise<void> {
-  const args = ['run', `migrate:${direction}`];
-  if (steps !== undefined) {
-    args.push('--', String(steps));
-  }
-  await run('npm', args, { cwd: process.cwd() });
+  // `npm` on Windows is `npm.cmd`, which `execFile` cannot exec directly
+  // without a shell - it fails with ENOENT despite npm being on PATH.
+  // `shell: true` resolves it the same way a developer's terminal would, on
+  // every platform this suite runs on. `steps` is a number this module
+  // produced, never external input, so building one command string carries
+  // none of the injection risk `shell: true` would otherwise add.
+  const command = `npm run migrate:${direction}${steps === undefined ? '' : ` -- ${steps}`}`;
+  await run(command, [], { cwd: process.cwd(), shell: true });
 }
 
 /** How many applied migrations must be rolled back to undo `migrationName`. */
