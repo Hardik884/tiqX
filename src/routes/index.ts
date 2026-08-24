@@ -5,6 +5,7 @@ import { bookingRouter } from '../modules/bookings/booking.routes.js';
 import { eventRouter, organiserDashboardRouter, organiserEventsRouter } from '../modules/events/event.routes.js';
 import { healthRouter } from '../modules/health/health.routes.js';
 import { ticketRouter } from '../modules/tickets/ticket.routes.js';
+import { adminUserRouter } from '../modules/users/user.routes.js';
 import { venueRouter } from '../modules/venues/venue.routes.js';
 import { waitlistMineRouter } from '../modules/waitlist/waitlist-mine.routes.js';
 import { waitlistOfferRouter } from '../modules/waitlist/waitlist-offer.routes.js';
@@ -18,6 +19,7 @@ v1Router.use('/organiser/dashboard', organiserDashboardRouter);
 v1Router.use('/bookings', bookingRouter);
 v1Router.use('/tickets', ticketRouter);
 v1Router.use('/venues', venueRouter);
+v1Router.use('/admin/users', adminUserRouter);
 v1Router.use('/waitlist/mine', waitlistMineRouter);
 v1Router.use('/waitlist/offers', waitlistOfferRouter);
 

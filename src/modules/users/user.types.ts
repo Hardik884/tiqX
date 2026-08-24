@@ -10,3 +10,24 @@ export type UserRole = (typeof USER_ROLES)[number];
 
 /** Registration never accepts a role from the client; everyone starts here. */
 export const DEFAULT_USER_ROLE: UserRole = 'customer';
+
+/**
+ * An account as the admin user list shows it. No password hash, and no
+ * refresh-token state: this view exists to answer "who is this, and what may
+ * they do?", nothing more.
+ */
+export interface AdminUserView {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  createdAt: Date;
+}
+
+export interface ListUsersResult {
+  users: AdminUserView[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}

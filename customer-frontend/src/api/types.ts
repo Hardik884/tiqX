@@ -185,3 +185,138 @@ export interface ApiErrorBody {
   code?: string;
   details?: unknown;
 }
+
+// ---------------------------------------------------------------------------
+// Organiser / admin management
+//
+// These types describe the same backend the customer views already talk to -
+// nothing here is a second API. What is different is the caller: every shape
+// below comes from an endpoint the backend gates on `organiser` or `admin`,
+// so a customer session can never fill one of them in.
+// ---------------------------------------------------------------------------
+
+export type EventStatus = 'draft' | 'published' | 'cancelled' | 'completed';
+
+/** The event as its own organiser (or an admin) sees it - a superset of the public view. */
+export interface ManagedEventView extends PublicEventView {
+  status: EventStatus;
+  organiserId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface OrganiserEventsResult {
+  events: ManagedEventView[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface DashboardTotals {
+  upcomingEvents: number;
+  totalBookings: number;
+  seatsSold: number;
+  availableSeats: number;
+  revenue: string;
+}
+
+export interface EventBookingSummary {
+  totalBookings: number;
+  seatsSold: number;
+  availableSeats: number;
+  revenue: string;
+  currency: string;
+}
+
+export interface EventBookingListItem {
+  id: string;
+  bookingReference: string;
+  status: string;
+  totalAmount: string;
+  currency: string;
+  seatCount: number;
+  customerName: string;
+  customerEmail: string;
+  createdAt: string;
+}
+
+export interface EventBookingsResult {
+  bookings: EventBookingListItem[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface CreateEventPayload {
+  venueId: string;
+  title: string;
+  description?: string;
+  category: EventCategory;
+  eventType: EventType;
+  startsAt: string;
+  endsAt: string;
+  status?: 'draft' | 'published';
+  /** Decimal strings per seat category - the column is NUMERIC, never a float. */
+  pricing?: Partial<Record<SeatCategory, string>>;
+  currency?: string;
+}
+
+export interface UpdateEventPayload {
+  title?: string;
+  description?: string;
+  category?: EventCategory;
+  startsAt?: string;
+  endsAt?: string;
+}
+
+export interface VenueSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  city: string | null;
+  seatCount: number;
+}
+
+export interface VenueDetail extends VenueSummary {
+  seatsByCategory: Record<SeatCategory, number>;
+  /** Events already built from this layout - see the seat-layout note in the admin UI. */
+  eventCount: number;
+}
+
+export interface VenueSeat {
+  id: string;
+  rowLabel: string;
+  seatNumber: number;
+  category: SeatCategory;
+}
+
+export interface SeatRowPayload {
+  rowLabel: string;
+  fromSeat: number;
+  toSeat: number;
+  category: SeatCategory;
+}
+
+export interface AdminUser {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  createdAt: string;
+}
+
+export interface AdminUsersResult {
+  users: AdminUser[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+/** One field-level validation message, as the backend's error `details` carries them. */
+export interface FieldError {
+  field: string;
+  message: string;
+}

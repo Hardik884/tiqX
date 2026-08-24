@@ -4,8 +4,8 @@ A ticket booking platform for movies and concerts: event discovery, a live
 visual seat map, seat holds with a countdown, booking confirmation with
 QR-coded tickets emailed automatically, cancellation, and a FIFO waitlist
 with time-limited offers when a seat frees up. Backend in TypeScript/Express
-on PostgreSQL and Redis; two separate React frontends for customers and for
-organisers/admins.
+on PostgreSQL and Redis; one React frontend serving customers, organisers and
+admins from a single deployment.
 
 ## Main features
 
@@ -24,23 +24,25 @@ organisers/admins.
   confirmation and emailed via a durable outbox (Resend or a mock provider).
 - **Waitlist** — join a sold-out event/category, FIFO time-limited offers
   when a seat opens up, accept-to-book in one step.
-- **Organiser/admin dashboard** — event management, per-event booking
-  summaries, and account-wide totals.
+- **Organiser workspace** — create and publish events, pick a venue, set the
+  date/time and per-category seat pricing, and read per-event booking,
+  revenue and seat-map figures alongside account-wide totals.
+- **Admin workspace** — platform-wide totals, venue creation and seat-layout
+  management (premium/standard categories), every organiser's events, and
+  account role management.
 
 Not implemented: payments (confirming a hold does not charge anything —
-see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), venue/seat-map creation
-through the product (venues are currently provisioned directly in the
-database), and password reset.
+see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) and password reset.
 
 ## Architecture overview
 
 ```
                      ┌─────────────────┐        ┌──────────────────────┐
 customer-frontend ─▶ │                 │        │                      │
- (React/Vite)        │   Express API   │◀──────▶│      PostgreSQL      │
-                     │  (+ /ws server) │        │  (source of truth)   │
-frontend ──────────▶ │                 │        │                      │
- (organiser/admin)   └────────┬────────┘        └──────────┬───────────┘
+ (React/Vite —       │   Express API   │◀──────▶│      PostgreSQL      │
+  customer +         │  (+ /ws server) │        │  (source of truth)   │
+  organiser +        │                 │        │                      │
+  admin)             └────────┬────────┘        └──────────┬───────────┘
                               │                             │
                               ▼                             │
                      ┌─────────────────┐                    │
@@ -76,7 +78,6 @@ domain change, then delivered by a background worker with retry/backoff. See
 | Cache / signals | Redis 6+ |
 | Email | Resend (or a `mock` provider for local dev — no API key needed) |
 | Customer frontend | React 18, Vite, TypeScript, Tailwind CSS, Zustand, `qrcode` |
-| Organiser/admin frontend | React 18, Vite, TypeScript, plain CSS |
 
 ## Repository structure
 
@@ -96,8 +97,10 @@ src/
   utils/logger.ts          structured JSON logger
 migrations/                versioned schema migrations (node-pg-migrate)
 tests/                     integration tests (real PostgreSQL + Redis)
-customer-frontend/         customer-facing booking app (React/Vite/Tailwind)
-frontend/                  organiser/admin dashboard (React/Vite)
+customer-frontend/         the tiqX web app — customer, organiser and admin
+                           (React/Vite/Tailwind, one deployment)
+frontend/                  superseded standalone organiser/admin dashboard;
+                           kept for reference, not deployed or built
 docs/                      API.md, DATABASE.md, ARCHITECTURE.md, SYSTEM_DESIGN.md
 ```
 
@@ -202,16 +205,19 @@ Runs on `http://localhost:5173` and proxies `/api` and `/ws` to
 `http://localhost:4000` (see `customer-frontend/vite.config.ts`) — no
 additional configuration needed against a locally running API.
 
-## Starting the organiser/admin frontend
+The organiser workspace lives at `/organiser` and the admin workspace at
+`/admin` inside the same app — there is no second frontend to start. The
+older standalone dashboard in `frontend/` has been superseded by these
+routes and is no longer built or deployed.
 
-```bash
-cd frontend
-npm run dev
+Everyone registers as a customer; an admin promotes an account to
+`organiser` (or `admin`) from **Admin → People**. The very first admin has
+to be set directly in the database, since there is no account to promote
+them from:
+
+```sql
+UPDATE users SET role = 'admin' WHERE email = 'you@example.com';
 ```
-
-Also defaults to port `5173` — Vite will pick the next free port
-automatically if the customer frontend is already running. Proxies `/api`
-to `http://localhost:4000` by default, overridable with `VITE_BACKEND_URL`.
 
 ## Running tests / typecheck / build
 
@@ -221,7 +227,7 @@ npm run typecheck     # tsc, no emit
 npm test              # integration suite — needs a migrated PostgreSQL and a running Redis
 npm run build          # emits to dist/
 
-# each frontend (from customer-frontend/ or frontend/)
+# frontend (from customer-frontend/)
 npm run build          # type-checks and produces a production build in dist/
 ```
 
@@ -249,9 +255,14 @@ today means provisioning the pieces below directly:
 5. Set `EMAIL_PROVIDER=resend` with a real `RESEND_API_KEY` and a verified
    sending domain for `EMAIL_FROM` (a Resend *sandbox* address only
    delivers to the account owner, not real customers).
-6. Build each frontend (`npm run build` in `customer-frontend/` and
-   `frontend/`) and serve the resulting `dist/` as static files, pointed at
-   the deployed API's real origin.
+6. Build the frontend (`npm run build` in `customer-frontend/`) and serve
+   the resulting `dist/` as static files, with a single-page-app fallback so
+   `/organiser/*` and `/admin/*` resolve on a direct hit. The deployed setup
+   is a Vercel project rooted at `customer-frontend/`, whose `vercel.json`
+   rewrites `/api/*` to the API's origin and everything else to
+   `index.html`; the real-time client connects straight to the API's own
+   `wss://.../ws` rather than through that rewrite (a WebSocket upgrade does
+   not survive an HTTP-layer proxy — see `src/lib/seatSocket.ts`).
 7. Point `/health` and `/health/ready` at your load balancer's liveness and
    readiness checks respectively.
 

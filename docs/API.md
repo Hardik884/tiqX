@@ -175,10 +175,67 @@ Role: organiser/admin, ownership-checked.
 Role: organiser/admin, ownership-checked, paginated (`page`, `limit`).
 → `200 { bookings: [{ id, bookingReference, status, totalAmount, currency, seatCount, customerName, customerEmail, createdAt }], page, limit, total, totalPages }`.
 
+## Venues & seat layout
+
+Reads are organiser/admin (an organiser has to pick a venue and see what they
+are selling); every write is **admin only**. A venue's `venue_seats` layout is
+the source an event's `show_seats` inventory is derived from — once, at event
+creation — so changes here shape events created afterwards and never alter an
+existing event's seat map.
+
 ### `GET /api/v1/venues`
-Role: organiser/admin. Read-only — **there is no venue-creation or seat-layout
-API**; venues must currently be provisioned directly in the database.
+Role: organiser/admin. Every venue with its physical seat count.
 → `200 { venues: [{ id, name, description, city, seatCount }] }`.
+
+### `GET /api/v1/venues/:venueId`
+Role: organiser/admin. One venue, with per-category seat totals and how many
+events already derived inventory from this layout.
+→ `200 { venue: { id, name, description, city, seatCount, seatsByCategory: { standard, premium }, eventCount } }`.
+
+### `POST /api/v1/venues`
+Role: admin. Body `{ name, description?, city? }`.
+→ `201 { venue }`.
+
+### `PATCH /api/v1/venues/:venueId`
+Role: admin. Body: any of `{ name, description, city }` (an empty string
+clears a nullable column).
+→ `200 { venue }`.
+
+### `GET /api/v1/venues/:venueId/seats`
+Role: organiser/admin. The physical layout — not any event's inventory.
+→ `200 { seats: [{ id, rowLabel, seatNumber, category }] }`.
+
+### `POST /api/v1/venues/:venueId/seats`
+Role: admin. Adds contiguous blocks of seats:
+`{ rows: [{ rowLabel, fromSeat, toSeat, category }] }` (max 26 rows per
+request, 100 seats per row). Idempotent — a seat that already exists is left
+untouched, never re-categorised.
+→ `201 { created, seats }`.
+
+### `PATCH /api/v1/venues/:venueId/seats/:seatId`
+Role: admin. Body `{ category }` — `standard` or `premium`. Existing events
+keep the price they derived at creation; `show_seats.price` is stored, not
+looked up through the category.
+→ `200 { seats }`.
+
+### `DELETE /api/v1/venues/:venueId/seats/:seatId`
+Role: admin. `409` if any event's seat map still refers to this seat.
+→ `200 { seats }`.
+
+## Account administration
+
+### `GET /api/v1/admin/users`
+Role: admin. Paginated (`page`, `limit`), optional `q` matching name or email.
+→ `200 { users: [{ id, name, email, role, createdAt }], page, limit, total, totalPages }`.
+
+### `PATCH /api/v1/admin/users/:userId/role`
+Role: admin. Body `{ role }` — `customer`, `organiser` or `admin`. Registration
+never accepts a role from the client, so this is the only way an organiser
+account comes to exist. An admin cannot change their own role (`409`), which
+is what stops the last admin locking everyone out. The new role applies to the
+target's next request — the API re-reads it from the database rather than
+trusting a token they already hold.
+→ `200 { user }`.
 
 ## Health / readiness
 

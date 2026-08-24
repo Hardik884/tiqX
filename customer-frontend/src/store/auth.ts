@@ -13,6 +13,8 @@ interface AuthState {
   refreshToken: string | null;
   user: SessionUser | null;
   setSession: (session: { accessToken: string; refreshToken: string; user: SessionUser | null }) => void;
+  /** Applies a role the server just reported - see `syncSessionRole`. */
+  setRole: (role: UserRole) => void;
   clearSession: () => void;
 }
 
@@ -52,6 +54,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   setSession: (session) => {
     const user = session.user ?? get().user;
     const next = { accessToken: session.accessToken, refreshToken: session.refreshToken, user };
+    persist(next);
+    set(next);
+  },
+  setRole: (role) => {
+    const { user, accessToken, refreshToken } = get();
+    if (user === null || user.role === role) {
+      return;
+    }
+    const next = { accessToken, refreshToken, user: { ...user, role } };
     persist(next);
     set(next);
   },
