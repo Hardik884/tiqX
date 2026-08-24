@@ -6,6 +6,7 @@ import { eventRouter, organiserDashboardRouter, organiserEventsRouter } from '..
 import { healthRouter } from '../modules/health/health.routes.js';
 import { ticketRouter } from '../modules/tickets/ticket.routes.js';
 import { venueRouter } from '../modules/venues/venue.routes.js';
+import { waitlistMineRouter } from '../modules/waitlist/waitlist-mine.routes.js';
 import { waitlistOfferRouter } from '../modules/waitlist/waitlist-offer.routes.js';
 
 const v1Router = Router();
@@ -17,6 +18,7 @@ v1Router.use('/organiser/dashboard', organiserDashboardRouter);
 v1Router.use('/bookings', bookingRouter);
 v1Router.use('/tickets', ticketRouter);
 v1Router.use('/venues', venueRouter);
+v1Router.use('/waitlist/mine', waitlistMineRouter);
 v1Router.use('/waitlist/offers', waitlistOfferRouter);
 
 /**

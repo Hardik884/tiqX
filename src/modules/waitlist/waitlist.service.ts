@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 
 import { config } from '../../config/index.js';
 import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
-import { withTransaction } from '../../db/pool.js';
+import { pool, withTransaction } from '../../db/pool.js';
 import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
 import { confirmHoldInTransaction } from '../bookings/booking.service.js';
@@ -16,6 +16,7 @@ import {
   findWaitlistEntryById,
   insertWaitlistEntry,
   insertWaitlistOffer,
+  listWaitlistEntriesForUser,
   lockNextWaitingEntry,
   markEntryAccepted,
   markEntryCancelled,
@@ -419,4 +420,9 @@ export async function acceptWaitlistOfferInTransaction(
     bookingId: confirmation.booking.id,
     bookingReference: confirmation.booking.bookingReference,
   };
+}
+
+/** GET /api/v1/waitlist/mine - every waitlist entry the caller has joined. */
+export async function listMyWaitlistEntries(userId: string) {
+  return listWaitlistEntriesForUser(pool, userId);
 }

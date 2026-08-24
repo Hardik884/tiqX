@@ -346,3 +346,79 @@ export async function markOfferExpiredByHoldId(
   const row = result.rows[0];
   return row ? toOfferRecord(row) : null;
 }
+
+// ---------------------------------------------------------------------------
+// Read-only: the caller's own waitlist entries - the frontend's waitlist view.
+// ---------------------------------------------------------------------------
+
+export interface WaitlistEntryWithEvent {
+  entry: WaitlistEntryRecord;
+  eventTitle: string;
+  eventStartsAt: Date;
+  venueName: string;
+  /** The caller's currently-offered offer for this entry, if any. */
+  offer: WaitlistOfferRecord | null;
+}
+
+/**
+ * Every waitlist entry the caller has ever joined, any status, newest first,
+ * left-joined to a currently-`offered` offer so the frontend can show "you
+ * have an active offer, expires at X" alongside plain queue status without a
+ * second round trip.
+ */
+export async function listWaitlistEntriesForUser(
+  db: Queryable,
+  userId: string,
+): Promise<WaitlistEntryWithEvent[]> {
+  const result = await db.query<
+    WaitlistEntryRow & {
+      event_title: string;
+      event_starts_at: Date;
+      venue_name: string;
+      offer_id: string | null;
+      offer_waitlist_entry_id: string | null;
+      offer_show_seat_id: string | null;
+      offer_hold_id: string | null;
+      offer_expires_at: Date | null;
+      offer_status: WaitlistOfferStatus | null;
+      offer_created_at: Date | null;
+      offer_accepted_at: Date | null;
+      offer_expired_at: Date | null;
+    }
+  >(
+    `SELECT we.*, e.title AS event_title, e.starts_at AS event_starts_at, v.name AS venue_name,
+            wo.id AS offer_id, wo.waitlist_entry_id AS offer_waitlist_entry_id,
+            wo.show_seat_id AS offer_show_seat_id, wo.hold_id AS offer_hold_id,
+            wo.expires_at AS offer_expires_at, wo.status AS offer_status,
+            wo.created_at AS offer_created_at, wo.accepted_at AS offer_accepted_at,
+            wo.expired_at AS offer_expired_at
+     FROM waitlist_entries we
+     JOIN events e ON e.id = we.event_id
+     JOIN venues v ON v.id = e.venue_id
+     LEFT JOIN waitlist_offers wo ON wo.waitlist_entry_id = we.id AND wo.status = 'offered'
+     WHERE we.user_id = $1
+     ORDER BY we.joined_at DESC`,
+    [userId],
+  );
+
+  return result.rows.map((row) => ({
+    entry: toEntryRecord(row),
+    eventTitle: row.event_title,
+    eventStartsAt: row.event_starts_at,
+    venueName: row.venue_name,
+    offer:
+      row.offer_id === null
+        ? null
+        : {
+            id: row.offer_id,
+            waitlistEntryId: row.offer_waitlist_entry_id!,
+            showSeatId: row.offer_show_seat_id!,
+            holdId: row.offer_hold_id!,
+            expiresAt: row.offer_expires_at!,
+            status: row.offer_status!,
+            createdAt: row.offer_created_at!,
+            acceptedAt: row.offer_accepted_at,
+            expiredAt: row.offer_expired_at,
+          },
+  }));
+}

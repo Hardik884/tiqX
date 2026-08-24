@@ -2,7 +2,11 @@ import { Router } from 'express';
 
 import { requireAuth } from '../../middleware/authenticate.js';
 import { issueTicketsHandler } from '../tickets/ticket.controller.js';
-import { cancelBookingHandler } from './booking.controller.js';
+import {
+  cancelBookingHandler,
+  getMyBookingDetailHandler,
+  listMyBookingsHandler,
+} from './booking.controller.js';
 
 /**
  * Mounted at /api/v1/bookings.
@@ -22,6 +26,12 @@ import { cancelBookingHandler } from './booking.controller.js';
  * ticket.routes.ts.
  */
 export const bookingRouter = Router();
+
+// GET /api/v1/bookings - the caller's own bookings
+bookingRouter.get('/', requireAuth, listMyBookingsHandler);
+
+// GET /api/v1/bookings/:bookingId - full detail, scoped to the caller
+bookingRouter.get('/:bookingId', requireAuth, getMyBookingDetailHandler);
 
 // POST /api/v1/bookings/:bookingId/cancel
 bookingRouter.post('/:bookingId/cancel', requireAuth, cancelBookingHandler);

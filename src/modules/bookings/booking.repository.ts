@@ -470,3 +470,184 @@ export async function releaseBookedSeats(
   );
   return result.rowCount ?? 0;
 }
+
+// ---------------------------------------------------------------------------
+// Read-only queries for the customer's own bookings - the frontend's "My
+// Tickets" page. Ownership (`b.user_id = $1`) is baked directly into every
+// WHERE clause here rather than checked afterwards, matching the same
+// not-found-for-both convention `lockHoldForConfirmation` and friends rely on
+// elsewhere: a booking that isn't the caller's simply doesn't match the query.
+// ---------------------------------------------------------------------------
+
+export interface BookingListItem {
+  booking: BookingRecord;
+  eventTitle: string;
+  eventStartsAt: Date;
+  venueName: string;
+  seatCount: number;
+  ticketCount: number;
+}
+
+interface MyBookingListRow extends BookingRow {
+  event_title: string;
+  event_starts_at: Date;
+  venue_name: string;
+  seat_count: string;
+  ticket_count: string;
+}
+
+export async function listBookingsForUser(
+  db: Queryable,
+  userId: string,
+  { page, limit }: { page: number; limit: number },
+): Promise<BookingListItem[]> {
+  const result = await db.query<MyBookingListRow>(
+    `SELECT b.*,
+            e.title AS event_title,
+            e.starts_at AS event_starts_at,
+            v.name AS venue_name,
+            (SELECT count(*) FROM booking_seats bs
+              WHERE bs.booking_id = b.id AND bs.cancelled_at IS NULL)::text AS seat_count,
+            (SELECT count(*) FROM tickets t
+              WHERE t.booking_id = b.id)::text AS ticket_count
+     FROM bookings b
+     JOIN events e ON e.id = b.event_id
+     JOIN venues v ON v.id = e.venue_id
+     WHERE b.user_id = $1
+     ORDER BY b.created_at DESC, b.id DESC
+     LIMIT $2 OFFSET $3`,
+    [userId, limit, (page - 1) * limit],
+  );
+
+  return result.rows.map((row) => ({
+    booking: toBookingRecord(row),
+    eventTitle: row.event_title,
+    eventStartsAt: row.event_starts_at,
+    venueName: row.venue_name,
+    seatCount: Number(row.seat_count),
+    ticketCount: Number(row.ticket_count),
+  }));
+}
+
+export async function countBookingsForUser(db: Queryable, userId: string): Promise<number> {
+  const result = await db.query<{ count: string }>(
+    'SELECT count(*)::text AS count FROM bookings WHERE user_id = $1',
+    [userId],
+  );
+  return Number(result.rows[0]!.count);
+}
+
+export interface BookingDetailSeat {
+  showSeatId: string;
+  rowLabel: string;
+  seatNumber: number;
+  price: string;
+  cancelled: boolean;
+}
+
+export interface BookingDetailTicket {
+  id: string;
+  ticketReference: string;
+  status: string;
+  issuedAt: Date;
+  usedAt: Date | null;
+}
+
+export interface BookingDetail {
+  booking: BookingRecord;
+  eventTitle: string;
+  eventStartsAt: Date;
+  eventEndsAt: Date;
+  venueName: string;
+  venueCity: string | null;
+  seats: BookingDetailSeat[];
+  tickets: BookingDetailTicket[];
+}
+
+/**
+ * Full detail for one booking, scoped to its owner. Returns null for a
+ * booking that does not exist or is not the caller's - identically, so this
+ * cannot be used to probe whether a given id belongs to someone else.
+ */
+export async function findBookingDetailForUser(
+  db: Queryable,
+  bookingId: string,
+  userId: string,
+): Promise<BookingDetail | null> {
+  const bookingResult = await db.query<
+    BookingRow & {
+      event_title: string;
+      event_starts_at: Date;
+      event_ends_at: Date;
+      venue_name: string;
+      venue_city: string | null;
+    }
+  >(
+    `SELECT b.*, e.title AS event_title, e.starts_at AS event_starts_at,
+            e.ends_at AS event_ends_at, v.name AS venue_name, v.city AS venue_city
+     FROM bookings b
+     JOIN events e ON e.id = b.event_id
+     JOIN venues v ON v.id = e.venue_id
+     WHERE b.id = $1 AND b.user_id = $2`,
+    [bookingId, userId],
+  );
+
+  const row = bookingResult.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  const seatsResult = await db.query<{
+    show_seat_id: string;
+    row_label: string;
+    seat_number: number;
+    price: string;
+    cancelled: boolean;
+  }>(
+    `SELECT bs.show_seat_id, vs.row_label, vs.seat_number, bs.price,
+            (bs.cancelled_at IS NOT NULL) AS cancelled
+     FROM booking_seats bs
+     JOIN show_seats ss ON ss.id = bs.show_seat_id
+     JOIN venue_seats vs ON vs.id = ss.venue_seat_id
+     WHERE bs.booking_id = $1
+     ORDER BY vs.row_label, vs.seat_number`,
+    [bookingId],
+  );
+
+  const ticketsResult = await db.query<{
+    id: string;
+    ticket_reference: string;
+    status: string;
+    issued_at: Date;
+    used_at: Date | null;
+  }>(
+    `SELECT id, ticket_reference, status, issued_at, used_at
+     FROM tickets
+     WHERE booking_id = $1
+     ORDER BY issued_at`,
+    [bookingId],
+  );
+
+  return {
+    booking: toBookingRecord(row),
+    eventTitle: row.event_title,
+    eventStartsAt: row.event_starts_at,
+    eventEndsAt: row.event_ends_at,
+    venueName: row.venue_name,
+    venueCity: row.venue_city,
+    seats: seatsResult.rows.map((s) => ({
+      showSeatId: s.show_seat_id,
+      rowLabel: s.row_label,
+      seatNumber: s.seat_number,
+      price: s.price,
+      cancelled: s.cancelled,
+    })),
+    tickets: ticketsResult.rows.map((t) => ({
+      id: t.id,
+      ticketReference: t.ticket_reference,
+      status: t.status,
+      issuedAt: t.issued_at,
+      usedAt: t.used_at,
+    })),
+  };
+}

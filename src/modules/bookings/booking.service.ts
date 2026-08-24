@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
 
+import { pool } from '../../db/pool.js';
 import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
@@ -9,9 +10,12 @@ import { hasUsedTickets } from '../tickets/ticket.repository.js';
 import { enqueueWaitlistAllocationForSeats } from '../waitlist/waitlist-outbox.repository.js';
 import {
   applyBookingTotal,
+  countBookingsForUser,
+  findBookingDetailForUser,
   generateBookingReference,
   insertBooking,
   insertBookingSeats,
+  listBookingsForUser,
   lockBookingForCancellation,
   lockBookingSeats,
   lockHoldForConfirmation,
@@ -507,4 +511,36 @@ async function createBookingRow(
   }
 
   throw new Error(`Could not allocate a unique booking reference in ${REFERENCE_ATTEMPTS} attempts`);
+}
+
+/** GET /api/v1/bookings - a page of the caller's own bookings, newest first. */
+export async function listMyBookings(
+  userId: string,
+  { page, limit }: { page: number; limit: number },
+) {
+  const [items, total] = await Promise.all([
+    listBookingsForUser(pool, userId, { page, limit }),
+    countBookingsForUser(pool, userId),
+  ]);
+
+  return {
+    bookings: items,
+    page,
+    limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+  };
+}
+
+/**
+ * GET /api/v1/bookings/:bookingId - full detail for one of the caller's own
+ * bookings. A booking that does not exist or belongs to someone else throws
+ * the same NotFoundError either way - see findBookingDetailForUser.
+ */
+export async function getMyBookingDetail(bookingId: string, userId: string) {
+  const detail = await findBookingDetailForUser(pool, bookingId, userId);
+  if (detail === null) {
+    throw new NotFoundError('Booking not found');
+  }
+  return detail;
 }

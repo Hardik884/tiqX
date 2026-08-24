@@ -15,6 +15,7 @@ import {
   acceptWaitlistOfferInTransaction,
   joinWaitlistInTransaction,
   leaveWaitlist,
+  listMyWaitlistEntries,
 } from './waitlist.service.js';
 
 interface FieldError {
@@ -178,4 +179,47 @@ export async function acceptWaitlistOfferHandler(req: Request, res: Response): P
   );
 
   res.status(outcome.statusCode).json(outcome.body);
+}
+
+interface MyWaitlistEntryResponseBody {
+  waitlistEntryId: string;
+  eventId: string;
+  eventTitle: string;
+  eventStartsAt: string;
+  venueName: string;
+  seatCategory: string;
+  status: string;
+  joinedAt: string;
+  offer: {
+    offerId: string;
+    expiresAt: string;
+    status: string;
+  } | null;
+}
+
+/** GET /api/v1/waitlist/mine - every waitlist entry the caller has joined. */
+export async function listMyWaitlistEntriesHandler(req: Request, res: Response): Promise<void> {
+  const { id: userId } = requireUser(req);
+  const entries = await listMyWaitlistEntries(userId);
+
+  const body: MyWaitlistEntryResponseBody[] = entries.map((item) => ({
+    waitlistEntryId: item.entry.id,
+    eventId: item.entry.eventId,
+    eventTitle: item.eventTitle,
+    eventStartsAt: item.eventStartsAt.toISOString(),
+    venueName: item.venueName,
+    seatCategory: item.entry.seatCategory,
+    status: item.entry.status,
+    joinedAt: item.entry.joinedAt.toISOString(),
+    offer:
+      item.offer === null
+        ? null
+        : {
+            offerId: item.offer.id,
+            expiresAt: item.offer.expiresAt.toISOString(),
+            status: item.offer.status,
+          },
+  }));
+
+  res.status(200).json({ entries: body });
 }
