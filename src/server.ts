@@ -6,6 +6,7 @@ import { closePool, verifyDatabaseConnection } from './db/pool.js';
 import { attachWebSocketServer, closeWebSocketServer } from './realtime/websocket-server.js';
 import { closeRedis, connectRedis, verifyRedisConnection } from './redis/client.js';
 import { logger } from './utils/logger.js';
+import { startInProcessWorkers, stopInProcessWorkers } from './workers/in-process.js';
 
 let shuttingDown = false;
 
@@ -36,11 +37,15 @@ async function shutdown(server: Server, reason: string, exitCode: number): Promi
       });
     });
     // Reverse of startup: stop taking work, then release dependencies. The
-    // WebSocket server first - `server.close()` above stops new HTTP
-    // requests and upgrades, but does nothing to sockets already upgraded,
-    // so those are torn down explicitly before either Redis or PostgreSQL
-    // goes away under them. Redis before PostgreSQL only because it is the
-    // cheaper handshake to unwind.
+    // in-process workers (if running) and the WebSocket server first -
+    // `server.close()` above stops new HTTP requests and upgrades, but does
+    // nothing to sockets already upgraded or loops already polling, so both
+    // are torn down explicitly before either Redis or PostgreSQL goes away
+    // under them. Redis before PostgreSQL only because it is the cheaper
+    // handshake to unwind.
+    if (config.runInProcessWorkers) {
+      await stopInProcessWorkers();
+    }
     await closeWebSocketServer();
     await closeRedis();
     await closePool();
@@ -81,6 +86,10 @@ async function start(): Promise<void> {
     });
     await closeRedis();
     process.exit(1);
+  }
+
+  if (config.runInProcessWorkers) {
+    startInProcessWorkers();
   }
 
   const server = createApp().listen(config.port, () => {

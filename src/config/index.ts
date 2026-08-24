@@ -41,6 +41,10 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().min(1).default('*'),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Runs the three background worker loops inside this process - see
+  // src/workers/in-process.ts. Off by default; a deployment already running
+  // them as separate processes must not also set this.
+  RUN_IN_PROCESS_WORKERS: booleanFromEnv.default(false),
 
   DATABASE_URL: z.string().min(1),
   DATABASE_SSL: booleanFromEnv.default(false),
@@ -249,6 +253,7 @@ export const config = {
   logLevel: env.LOG_LEVEL,
   corsOrigin: env.CORS_ORIGIN,
   shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+  runInProcessWorkers: env.RUN_IN_PROCESS_WORKERS,
   database: {
     url: env.DATABASE_URL,
     ssl: env.DATABASE_SSL,
