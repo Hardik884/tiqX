@@ -174,13 +174,17 @@ const envSchema = z.object({
   // Ticket email (notifications outbox + worker)
   // ---------------------------------------------------------------------------
   // 'mock' logs and records the message instead of calling out - the default,
-  // so a developer or test run never needs a real API key. 'resend' is the one
-  // real provider this codebase knows how to talk to; nothing else is wired up
-  // yet, and that is deliberate - see EmailProvider.
-  EMAIL_PROVIDER: z.enum(['mock', 'resend']).default('mock'),
-  // Both optional at the schema level - not needed for 'mock' - and required
-  // together below, only when EMAIL_PROVIDER is 'resend'.
+  // so a developer or test run never needs a real API key. 'resend' and
+  // 'brevo' are the two real providers this codebase knows how to talk to -
+  // see EmailProvider.
+  EMAIL_PROVIDER: z.enum(['mock', 'resend', 'brevo']).default('mock'),
+  // Optional at the schema level - not needed for 'mock' - and required
+  // below, only when EMAIL_PROVIDER selects the matching provider.
   RESEND_API_KEY: z.string().min(1).optional(),
+  BREVO_API_KEY: z.string().min(1).optional(),
+  // The verified sender address, shared by whichever provider is active -
+  // both APIs want one "from" address and neither cares that the other also
+  // reads this variable.
   EMAIL_FROM: z.email().optional(),
 
   // Same shape and the same retry formula as the hold-expiration outbox
@@ -219,18 +223,20 @@ const envSchema = z.object({
 });
 
 /**
- * `RESEND_API_KEY`/`EMAIL_FROM` are only meaningful, and only validated, when
- * email delivery is actually enabled - the same "required only when the
- * feature is on" shape as `JWT_SECRET` being unconditionally required while
- * these two are conditional on a provider choice.
+ * The provider-specific API key plus `EMAIL_FROM` are only meaningful, and
+ * only validated, when that provider is actually selected - the same
+ * "required only when the feature is on" shape as `JWT_SECRET` being
+ * unconditionally required while these are conditional on a provider choice.
  */
-const configuredSchema = envSchema.refine(
-  (value) => value.EMAIL_PROVIDER !== 'resend' || (value.RESEND_API_KEY && value.EMAIL_FROM),
-  {
+const configuredSchema = envSchema
+  .refine((value) => value.EMAIL_PROVIDER !== 'resend' || (value.RESEND_API_KEY && value.EMAIL_FROM), {
     message: 'RESEND_API_KEY and EMAIL_FROM are required when EMAIL_PROVIDER=resend',
     path: ['EMAIL_PROVIDER'],
-  },
-);
+  })
+  .refine((value) => value.EMAIL_PROVIDER !== 'brevo' || (value.BREVO_API_KEY && value.EMAIL_FROM), {
+    message: 'BREVO_API_KEY and EMAIL_FROM are required when EMAIL_PROVIDER=brevo',
+    path: ['EMAIL_PROVIDER'],
+  });
 
 const parsed = configuredSchema.safeParse(process.env);
 
@@ -336,6 +342,7 @@ export const config = {
   email: {
     provider: env.EMAIL_PROVIDER,
     resendApiKey: env.RESEND_API_KEY,
+    brevoApiKey: env.BREVO_API_KEY,
     from: env.EMAIL_FROM,
   },
   notifications: {

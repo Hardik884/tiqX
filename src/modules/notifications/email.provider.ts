@@ -113,6 +113,49 @@ export class ResendEmailProvider implements EmailProvider {
   }
 }
 
+/**
+ * Delivers through Brevo's transactional email API.
+ *
+ * Same shape and the same failure discipline as {@link ResendEmailProvider}:
+ * the API key is read once at construction, never logged, and a failure
+ * response is summarised from Brevo's own error field, never the raw request
+ * echoed back. Brevo's API wants the sender as `{ name, email }` rather than
+ * a single string - the name is fixed here rather than configurable, since
+ * nothing else in this codebase's email surface has needed a display name
+ * before now, and one more environment variable for a cosmetic value is not
+ * worth it yet.
+ */
+export class BrevoEmailProvider implements EmailProvider {
+  constructor(
+    private readonly apiKey: string,
+    private readonly fromEmail: string,
+  ) {}
+
+  async sendTicketEmail(message: TicketEmailMessage): Promise<void> {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': this.apiKey,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify({
+        sender: { name: 'tiqX', email: this.fromEmail },
+        to: [{ email: message.to }],
+        subject: renderSubject(message),
+        textContent: renderText(message),
+      }),
+    });
+
+    if (!response.ok) {
+      // Brevo's error body is `{ code, message }`; neither ever echoes the
+      // API key, but the response is still capped defensively.
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Brevo API responded ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+    }
+  }
+}
+
 let cachedProvider: EmailProvider | undefined;
 
 /**
@@ -133,6 +176,11 @@ export function getEmailProvider(): EmailProvider {
       throw new Error('EMAIL_PROVIDER=resend requires RESEND_API_KEY and EMAIL_FROM');
     }
     cachedProvider = new ResendEmailProvider(config.email.resendApiKey, config.email.from);
+  } else if (config.email.provider === 'brevo') {
+    if (!config.email.brevoApiKey || !config.email.from) {
+      throw new Error('EMAIL_PROVIDER=brevo requires BREVO_API_KEY and EMAIL_FROM');
+    }
+    cachedProvider = new BrevoEmailProvider(config.email.brevoApiKey, config.email.from);
   } else {
     cachedProvider = new MockEmailProvider();
   }
