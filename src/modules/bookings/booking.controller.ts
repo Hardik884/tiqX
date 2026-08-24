@@ -2,11 +2,11 @@ import type { Request, Response } from 'express';
 
 import { BadRequestError } from '../../errors/app-error.js';
 import { requireUser } from '../../middleware/authenticate.js';
-import { hashConfirmRequest } from '../idempotency/idempotency.hash.js';
+import { hashCancelRequest, hashConfirmRequest } from '../idempotency/idempotency.hash.js';
 import { IDEMPOTENCY_HEADER, idempotencyKeySchema } from '../idempotency/idempotency.schema.js';
 import { runIdempotently } from '../idempotency/idempotency.service.js';
-import { confirmParamsSchema } from './booking.schema.js';
-import { confirmHoldInTransaction } from './booking.service.js';
+import { cancelParamsSchema, confirmParamsSchema } from './booking.schema.js';
+import { cancelBookingInTransaction, confirmHoldInTransaction } from './booking.service.js';
 
 interface FieldError {
   field: string;
@@ -23,6 +23,18 @@ interface BookingResponseBody {
   totalAmount: string;
   currency: string;
   createdAt: string;
+}
+
+interface CancellationResponseBody {
+  bookingId: string;
+  bookingReference: string;
+  eventId: string;
+  status: string;
+  releasedSeatCount: number;
+  /** Unchanged by cancellation; echoed so the client can show what was paid. */
+  totalAmount: string;
+  currency: string;
+  cancelledAt: string;
 }
 
 function toFieldErrors(issues: readonly { path: PropertyKey[]; message: string }[]): FieldError[] {
@@ -102,6 +114,54 @@ export async function confirmHoldHandler(req: Request, res: Response): Promise<v
         totalAmount: result.booking.totalAmount,
         currency: result.booking.currency,
         createdAt: result.booking.createdAt.toISOString(),
+      };
+    },
+  );
+
+  res.status(outcome.statusCode).json(outcome.body);
+}
+
+/**
+ * HTTP concerns only. Like confirmation, there is no request body at all, so
+ * the owner of the cancellation cannot be anything but the authenticated
+ * principal.
+ *
+ * 200 rather than 201: cancelling changes a booking, it does not create a
+ * resource. The Idempotency-Key is required for the same reason it is on
+ * confirmation - a client that loses the response to a network blip will retry,
+ * and that retry must not be answered as a fresh cancellation.
+ */
+export async function cancelBookingHandler(req: Request, res: Response): Promise<void> {
+  const params = cancelParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    throw new BadRequestError('Invalid booking id', toFieldErrors(params.error.issues));
+  }
+
+  const idempotencyKey = readIdempotencyKey(req);
+  const { id: userId } = requireUser(req);
+  const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : undefined;
+
+  const input = { userId, bookingId: params.data.bookingId };
+
+  const outcome = await runIdempotently<CancellationResponseBody>(
+    {
+      userId,
+      key: idempotencyKey,
+      requestHash: hashCancelRequest(input),
+      successStatus: 200,
+    },
+    async (client) => {
+      const result = await cancelBookingInTransaction(client, input, requestId);
+
+      return {
+        bookingId: result.booking.id,
+        bookingReference: result.booking.bookingReference,
+        eventId: result.booking.eventId,
+        status: result.booking.status,
+        releasedSeatCount: result.releasedSeatCount,
+        totalAmount: result.booking.totalAmount,
+        currency: result.booking.currency,
+        cancelledAt: result.booking.updatedAt.toISOString(),
       };
     },
   );

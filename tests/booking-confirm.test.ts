@@ -536,7 +536,8 @@ describe('database invariants', () => {
     const hold = await createHold({ eventId, userId, showSeatIds: [seatId], ttlSeconds: 600 });
     await confirm(eventId, hold.holdId, { userId });
 
-    // A second booking row is legitimate; attaching the *same seat* to it is not.
+    // A second booking row is legitimate; attaching the *same seat* to it while
+    // the first booking is still live is not.
     const other = await createHold({ eventId, userId, showSeatIds: [seats[1]!.id], ttlSeconds: 600 });
     const second = await confirm(eventId, other.holdId, { userId });
 
@@ -545,8 +546,8 @@ describe('database invariants', () => {
         'INSERT INTO booking_seats (booking_id, show_seat_id, price) VALUES ($1, $2, 1.00)',
         [second.json.bookingId, seatId],
       ),
-      /booking_seats_show_seat_id_key|duplicate key/,
-      'a show seat must never belong to two bookings',
+      /booking_seats_live_show_seat_key|duplicate key/,
+      'a show seat must never belong to two live bookings',
     );
   });
 

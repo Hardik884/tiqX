@@ -66,10 +66,14 @@ describe('bookings migration', () => {
       'bookings_pkey',
       'bookings_user_id_idx',
     ]);
+    // `migrate up` re-applies everything, including the cancellation migration
+    // that replaced booking_seats_show_seat_id_key with a partial one. This is
+    // the state of the table at HEAD, not the state this migration leaves.
     assert.deepEqual(await indexNames('booking_seats'), [
       'booking_seats_booking_id_idx',
+      'booking_seats_live_show_seat_key',
       'booking_seats_pkey',
-      'booking_seats_show_seat_id_key',
+      'booking_seats_show_seat_id_idx',
     ]);
   });
 

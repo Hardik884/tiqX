@@ -8,12 +8,22 @@ import {
   generateBookingReference,
   insertBooking,
   insertBookingSeats,
+  lockBookingForCancellation,
+  lockBookingSeats,
   lockHoldForConfirmation,
   lockHoldSeats,
+  markBookingCancelled,
+  markBookingSeatsCancelled,
   markHoldConverted,
   markSeatsBooked,
+  releaseBookedSeats,
 } from './booking.repository.js';
-import type { ConfirmHoldInput, ConfirmHoldResult } from './booking.types.js';
+import type {
+  CancelBookingInput,
+  CancelBookingResult,
+  ConfirmHoldInput,
+  ConfirmHoldResult,
+} from './booking.types.js';
 
 /**
  * A hold that does not exist, is not yours, or belongs to another event.
@@ -186,6 +196,179 @@ export async function confirmHoldInTransaction(
     booking: { ...booking, totalAmount },
     seatCount: showSeatIds.length,
   };
+}
+
+/**
+ * A booking that does not exist or is not yours.
+ *
+ * The same reasoning as {@link holdNotFound}, applied to a resource that is
+ * worth rather more to probe. Answering 403 for "someone else's booking" and
+ * 404 for "no such booking" would let anyone walk booking ids and learn which
+ * ones are real - and a real booking id is a support-desk credential in most
+ * ticketing systems. One answer for both, and the distinction kept in the log.
+ */
+function bookingNotFound(): NotFoundError {
+  return new NotFoundError('Booking not found', { reason: 'BOOKING_NOT_FOUND' });
+}
+
+/**
+ * Cancels a confirmed booking and puts its seats back on sale.
+ *
+ * THE STATE MACHINE.
+ *
+ *     confirmed ──> cancelled     (this transaction, guarded on `confirmed`)
+ *     cancelled ── terminal
+ *
+ * There is no statement anywhere in this codebase that writes `confirmed` over
+ * `cancelled`, and the UPDATE that performs the transition is itself guarded on
+ * `status = 'confirmed'`, so a second cancellation changes zero rows rather
+ * than repeating the work. That zero is treated as a refusal, never as
+ * success - which is what stops a seat being released twice.
+ *
+ * WHAT MOVES AND WHAT DOES NOT.
+ *
+ *     bookings.status         confirmed -> cancelled
+ *     booking_seats           rows stay; only `cancelled_at` is stamped
+ *     booking_seats.price     untouched, it is a historical snapshot
+ *     bookings.total_amount   untouched, for the same reason
+ *     bookings.currency       untouched
+ *     show_seats.status       booked -> available
+ *     reservation_holds       untouched - see below
+ *
+ * THE HOLD STAYS CONVERTED. Cancelling a booking is not undoing the
+ * confirmation that created it. The hold was consumed when the booking was
+ * made; `converted` is terminal and records that it happened. Rewinding it to
+ * `active` would resurrect a reservation nobody asked for, with an `expires_at`
+ * long past, and would hand the seats to a hold whose owner has just given them
+ * up. After confirmation the booking owns the seats, so the booking - and only
+ * the booking - releases them.
+ *
+ * LOCK ORDER: the booking, then its seats in ascending id order. That extends
+ * the existing global order rather than contradicting it:
+ *
+ *     idempotency_keys  ->  bookings  ->  show_seats (by id)  ->  reservation_holds
+ *
+ * Confirmation takes seats then the hold, and never locks an existing `bookings`
+ * row - it inserts one that no other transaction can yet see. So `bookings` and
+ * `reservation_holds` sit on opposite sides of `show_seats` and no cycle is
+ * possible. The only table both paths contend for is `show_seats`, and both
+ * reach it in the same ascending-id order, which is what makes reservation,
+ * expiration, confirmation and cancellation safe to run at once.
+ *
+ * WHERE A REFUND WOULD GO. Not here. This function must stay a pure PostgreSQL
+ * transaction: it holds row locks on inventory that other customers are queuing
+ * for, and an HTTP call to a payment provider inside those locks would hold them
+ * for the provider's latency and timeout, not the database's. The boundary is
+ * therefore:
+ *
+ *     cancel booking (this transaction, commits)
+ *         -> enqueue a refund intent
+ *             -> payment provider
+ *                 -> refund webhook updates the refund record
+ *
+ * The enqueue step is the only piece that would join this transaction, and it
+ * would join it the way hold expiration already does: an outbox row written
+ * here and drained by a worker afterwards. Nothing external is called while a
+ * lock is held.
+ */
+export async function cancelBookingInTransaction(
+  client: PoolClient,
+  input: CancelBookingInput,
+  requestId: string | undefined,
+): Promise<CancelBookingResult> {
+  const booking = await lockBookingForCancellation(client, input.bookingId);
+
+  if (booking === null || booking.userId !== input.userId) {
+    logger.warn('Rejected booking cancellation', {
+      requestId,
+      bookingId: input.bookingId,
+      userId: input.userId,
+      reason: booking === null ? 'BOOKING_NOT_FOUND' : 'BOOKING_NOT_OWNED',
+    });
+    throw bookingNotFound();
+  }
+
+  if (booking.status === 'cancelled') {
+    logger.warn('Rejected booking cancellation', {
+      requestId,
+      bookingId: input.bookingId,
+      eventId: booking.eventId,
+      userId: input.userId,
+      reason: 'BOOKING_ALREADY_CANCELLED',
+    });
+    throw new ConflictError('This booking has already been cancelled', {
+      reason: 'BOOKING_ALREADY_CANCELLED',
+    });
+  }
+
+  if (booking.status !== 'confirmed') {
+    // Unreachable while the status check allows only two values, and kept so
+    // that adding a third one fails loudly here instead of cancelling it.
+    logger.warn('Rejected booking cancellation', {
+      requestId,
+      bookingId: input.bookingId,
+      eventId: booking.eventId,
+      reason: 'BOOKING_INVALID',
+    });
+    throw new ConflictError('This booking can no longer be cancelled', {
+      reason: 'BOOKING_INVALID',
+    });
+  }
+
+  // Seats after the booking, in ascending id order, in one statement.
+  const seats = await lockBookingSeats(client, input.bookingId);
+
+  const notBooked = seats.filter((seat) => seat.status !== 'booked');
+  if (seats.length === 0 || notBooked.length > 0) {
+    // A confirmed booking whose seats are not all booked means the booking and
+    // the inventory disagree. Releasing seats on that basis is exactly how a
+    // seat held by someone else gets taken away, so refuse instead.
+    logger.error('Booking and seat state disagree, refusing to cancel', {
+      requestId,
+      bookingId: input.bookingId,
+      eventId: booking.eventId,
+      seats: seats.length,
+      notBooked: notBooked.length,
+    });
+    throw new ConflictError('Seats for this booking are not in a cancellable state', {
+      reason: 'CANCELLATION_CONFLICT',
+    });
+  }
+
+  const showSeatIds = seats.map((seat) => seat.showSeatId);
+
+  // The booking transitions first. Every release below is therefore already
+  // covered by a state change that this same transaction has made, so there is
+  // no instant - even inside the transaction - where a seat is free while its
+  // booking still claims it.
+  const cancelled = await markBookingCancelled(client, input.bookingId);
+  if (cancelled === null) {
+    throw new Error('Booking was no longer confirmed when cancelling');
+  }
+
+  const stamped = await markBookingSeatsCancelled(client, input.bookingId);
+  if (stamped !== showSeatIds.length) {
+    throw new Error(`Expected to retire ${showSeatIds.length} booking seats, updated ${stamped}`);
+  }
+
+  const released = await releaseBookedSeats(client, showSeatIds);
+  if (released !== showSeatIds.length) {
+    // Guarded on `status = 'booked'`, so a shortfall means a seat left `booked`
+    // between the lock and here - impossible while the lock holds, and a reason
+    // to abort rather than half-release.
+    throw new Error(`Expected to release ${showSeatIds.length} seats, updated ${released}`);
+  }
+
+  logger.info('Cancelled booking', {
+    requestId,
+    bookingId: cancelled.id,
+    bookingReference: cancelled.bookingReference,
+    eventId: cancelled.eventId,
+    userId: cancelled.userId,
+    releasedSeatCount: released,
+  });
+
+  return { booking: cancelled, releasedSeatCount: released };
 }
 
 /** How many booking references to try before giving up. */

@@ -21,6 +21,12 @@ export interface BookingRecord {
   totalAmount: string;
   currency: string;
   createdAt: Date;
+  /**
+   * Maintained by the `bookings_set_updated_at` trigger. For a cancelled
+   * booking this is when it was cancelled - there is no separate cancelled_at
+   * column, because status plus this timestamp already say it.
+   */
+  updatedAt: Date;
 }
 
 export interface BookingSeatRecord {
@@ -38,4 +44,16 @@ export interface ConfirmHoldInput {
 export interface ConfirmHoldResult {
   booking: BookingRecord;
   seatCount: number;
+}
+
+export interface CancelBookingInput {
+  /** Always the authenticated principal; never a value from the request body. */
+  userId: string;
+  bookingId: string;
+}
+
+export interface CancelBookingResult {
+  booking: BookingRecord;
+  /** How many seats went back on sale. */
+  releasedSeatCount: number;
 }

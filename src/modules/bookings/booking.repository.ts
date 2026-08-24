@@ -13,6 +13,7 @@ interface BookingRow {
   total_amount: string;
   currency: string;
   created_at: Date;
+  updated_at: Date;
 }
 
 function toBookingRecord(row: BookingRow): BookingRecord {
@@ -28,6 +29,7 @@ function toBookingRecord(row: BookingRow): BookingRecord {
     totalAmount: row.total_amount,
     currency: row.currency,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -249,4 +251,130 @@ export async function findBookingSeats(
     [bookingId],
   );
   return result.rows.map((row) => ({ showSeatId: row.show_seat_id, price: row.price }));
+}
+
+export interface LockedBooking {
+  userId: string;
+  eventId: string;
+  status: BookingStatus;
+}
+
+/**
+ * Locks the booking and returns what cancellation needs to judge it.
+ *
+ * Taken *before* the seats, which is the reverse of confirmation - and safe,
+ * because the two paths can never contend for the same booking row. A
+ * confirmation creates a booking that does not yet exist, so nothing else can
+ * be holding it; cancellation is the only path that locks an existing booking.
+ * The shared resource is `show_seats`, and both paths reach it in the same
+ * ascending-id order.
+ */
+export async function lockBookingForCancellation(
+  db: Queryable,
+  bookingId: string,
+): Promise<LockedBooking | null> {
+  const result = await db.query<{ user_id: string; event_id: string; status: BookingStatus }>(
+    `SELECT user_id, event_id, status
+     FROM bookings
+     WHERE id = $1
+     FOR UPDATE`,
+    [bookingId],
+  );
+
+  const row = result.rows[0];
+  return row ? { userId: row.user_id, eventId: row.event_id, status: row.status } : null;
+}
+
+/**
+ * Locks the seats of a booking, ascending by id, and reports their state.
+ *
+ * Same ordering as every other path that touches `show_seats`. One statement,
+ * not one per seat: a ten-seat booking must not become ten round trips inside a
+ * transaction that is already holding locks.
+ *
+ * Only live seat rows are considered. A seat released by an earlier
+ * cancellation is history and must not be locked or re-released.
+ */
+export async function lockBookingSeats(
+  db: Queryable,
+  bookingId: string,
+): Promise<HoldSeatState[]> {
+  const result = await db.query<{ show_seat_id: string; status: string }>(
+    `SELECT ss.id AS show_seat_id, ss.status
+     FROM show_seats ss
+     WHERE ss.id IN (
+       SELECT bs.show_seat_id FROM booking_seats bs
+       WHERE bs.booking_id = $1 AND bs.cancelled_at IS NULL
+     )
+     ORDER BY ss.id
+     FOR UPDATE`,
+    [bookingId],
+  );
+
+  return result.rows.map((row) => ({ showSeatId: row.show_seat_id, status: row.status }));
+}
+
+/**
+ * Transitions a booking to cancelled, guarded on its current state.
+ *
+ * `AND status = 'confirmed'` is what makes cancelled a terminal state: a second
+ * cancellation changes zero rows, and the caller treats a zero count as "not
+ * mine to do" rather than assuming success. cancelled -> confirmed has no
+ * statement anywhere that could perform it.
+ */
+export async function markBookingCancelled(
+  db: Queryable,
+  bookingId: string,
+): Promise<BookingRecord | null> {
+  const result = await db.query<BookingRow>(
+    `UPDATE bookings
+     SET status = 'cancelled'
+     WHERE id = $1 AND status = 'confirmed'
+     RETURNING *`,
+    [bookingId],
+  );
+
+  const row = result.rows[0];
+  return row ? toBookingRecord(row) : null;
+}
+
+/**
+ * Stamps the booking's seat rows as cancelled.
+ *
+ * The rows stay - they are the historical record of what was sold and at what
+ * price, and nothing here touches `price`. The timestamp only drops them out of
+ * the partial unique index so the seat can be sold again.
+ */
+export async function markBookingSeatsCancelled(
+  db: Queryable,
+  bookingId: string,
+): Promise<number> {
+  const result = await db.query(
+    `UPDATE booking_seats
+     SET cancelled_at = now()
+     WHERE booking_id = $1 AND cancelled_at IS NULL`,
+    [bookingId],
+  );
+  return result.rowCount ?? 0;
+}
+
+/**
+ * Releases the seats, guarded on their current state.
+ *
+ * `AND status = 'booked'` means a seat that is somehow no longer booked is left
+ * alone rather than being wrenched to available. The caller compares the count
+ * against what it locked and aborts on a mismatch, so a disagreement between
+ * the booking and the seats can never be papered over.
+ */
+export async function releaseBookedSeats(
+  db: Queryable,
+  showSeatIds: readonly string[],
+): Promise<number> {
+  const result = await db.query(
+    `UPDATE show_seats
+     SET status = 'available'
+     WHERE id = ANY($1::uuid[]) AND status = 'booked'`,
+    [showSeatIds],
+  );
+  return result.rowCount ?? 0;
 }

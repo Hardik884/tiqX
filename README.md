@@ -71,6 +71,7 @@ npm start
 | `POST` | `/api/v1/events`| Create an event and its inventory. **Organiser/admin.** |
 | `POST` | `/api/v1/events/:eventId/holds` | Temporarily hold seats. **Auth.**   |
 | `POST` | `/api/v1/events/:eventId/holds/:holdId/confirm` | Convert a hold into a booking. **Auth.** |
+| `POST` | `/api/v1/bookings/:bookingId/cancel` | Cancel a booking and release its seats. **Auth.** |
 
 Neither endpoint returns configuration, credentials or connection details.
 `/health/ready` responds `503` with `{"dependencies":{"database":"down"}}` when
@@ -102,7 +103,7 @@ migrations/                versioned schema migrations (node-pg-migrate)
 | `events`      | movies and concerts scheduled at a venue             |
 | `show_seats`  | per-event inventory state of each physical seat, and its price |
 | `bookings`    | confirmed bookings, with a total snapshot            |
-| `booking_seats` | which seats a booking covers, at the price charged |
+| `booking_seats` | which seats a booking covers, at the price charged; `cancelled_at` retires a row without deleting it |
 | `reservation_holds` | a customer's temporary claim on seats of one event |
 | `reservation_hold_seats` | which show seats a hold covers                |
 | `idempotency_keys` | stored responses that make a retried write safe to repeat |
@@ -756,14 +757,18 @@ seat without a booking, cannot be read by anyone.
 One global order, followed by every path that touches these tables:
 
 ```
-idempotency_keys  ->  show_seats (ascending id)  ->  reservation_holds
+idempotency_keys  ->  bookings  ->  show_seats (ascending id)  ->  reservation_holds
 ```
 
-Reservation, the expiration worker and confirmation all obey it. Two of the
-three naturally start from a hold, so taking the hold lock first is the
-tempting mistake and the one that cycles against a reservation coming the other
-way. Deadlocks are avoided by ordering, not by leaving PostgreSQL to detect
-them.
+Reservation, the expiration worker, confirmation and cancellation all obey it.
+Three of the four naturally start from a hold, so taking the hold lock first is
+the tempting mistake and the one that cycles against a reservation coming the
+other way. Deadlocks are avoided by ordering, not by leaving PostgreSQL to
+detect them.
+
+Confirmation never locks an existing `bookings` row - it inserts one nobody else
+can see yet - so only cancellation uses that step. See
+[Booking cancellation](#booking-cancellation) for why that cannot cycle.
 
 ### Money
 
@@ -803,13 +808,13 @@ see it and an attacker cannot.
 Constraints, not just code:
 
 - `UNIQUE (bookings.hold_id)` - one booking per hold.
-- `UNIQUE (booking_seats.show_seat_id)` - **a show seat belongs to at most one
-  booking.** Stricter than "one *confirmed* booking", which a partial unique
-  index cannot express because the status lives on another table. The strict
-  rule is right today: cancellation does not release seats. It also subsumes
-  `UNIQUE (booking_id, show_seat_id)` - a seat that appears at most once
-  overall cannot appear twice within one booking - so that second index was not
-  added.
+- `UNIQUE (booking_seats.show_seat_id) WHERE cancelled_at IS NULL` - **a show
+  seat belongs to at most one live booking.** This started as a plain unique
+  constraint, which was right while cancellation did not exist and had to become
+  partial when it did; see
+  [Booking cancellation](#booking-cancellation). It subsumes
+  `UNIQUE (booking_id, show_seat_id)` - a seat that appears at most once overall
+  cannot appear twice within one booking - so that second index was not added.
 - `total_amount >= 0`, `price >= 0`, status CHECKs, currency shape.
 - `user_id` and `event_id` are `RESTRICT`, not `CASCADE`: a financial record
   must not vanish because a user row was deleted.
@@ -821,11 +826,223 @@ dropped as well does the 50-way test produce duplicate bookings.
 
 ### Deferred
 
-Cancellation is designed for - `bookings.status` already allows `cancelled` -
-but not implemented, and it does not release seats. When it does, the seat
-uniqueness constraint becomes a partial unique index over a denormalised
-status. Payments, refunds and ticket delivery are all out of scope here.
+Payments, refunds and ticket delivery are out of scope here. Cancellation is
+implemented - see the next section, which is also where the seat uniqueness
+constraint predicted above actually became a partial unique index.
 
+
+## Booking cancellation
+
+A booking is cancelled through one endpoint:
+
+```
+POST /api/v1/bookings/:bookingId/cancel
+Authorization: Bearer <access-token>
+Idempotency-Key: <required>
+```
+
+No request body, and none possible: the owner is the authenticated principal.
+A booking is addressed on its own rather than under its event - it is globally
+unique, and a URL carrying both would only give a caller a second thing to get
+wrong.
+
+```jsonc
+// 200
+{ "bookingId": "...", "bookingReference": "TX-2026-K4M9QP2X", "eventId": "...",
+  "status": "cancelled", "releasedSeatCount": 3,
+  "totalAmount": "1350.30", "currency": "INR", "cancelledAt": "..." }
+```
+
+`200`, not `201`: cancelling changes a booking, it does not create anything. The
+total is echoed unchanged - it is what the customer paid, and cancelling does
+not rewrite history.
+
+### The one schema change, and why it was needed
+
+Three of the four state machines needed nothing. `bookings.status` already
+allowed `cancelled`, `show_seats.status` already allowed `available`, and
+`reservation_holds` is not touched at all.
+
+What did block cancellation was a constraint from the previous task:
+`booking_seats_show_seat_id_key`, unique on `show_seat_id` across *every*
+booking. It was right while cancellation did not exist - a sold seat stayed
+sold - and wrong the moment it did. Cancel a seat, resell it, and PostgreSQL
+refuses:
+
+```
+ERROR: duplicate key value violates unique constraint "booking_seats_show_seat_id_key"
+```
+
+The invariant it was reaching for was never "one booking ever", it was **one
+live booking**. A partial unique index cannot read `bookings.status` from
+another table, so liveness has to be visible on the row itself:
+
+```sql
+ALTER TABLE booking_seats ADD COLUMN cancelled_at timestamptz;
+DROP  CONSTRAINT booking_seats_show_seat_id_key;
+CREATE UNIQUE INDEX booking_seats_live_show_seat_key
+    ON booking_seats (show_seat_id) WHERE cancelled_at IS NULL;
+CREATE INDEX booking_seats_show_seat_id_idx ON booking_seats (show_seat_id);
+```
+
+The plain index is not redundant with the partial one. The partial index
+deliberately excludes cancelled rows, so it cannot answer "does *any* row
+reference this seat?" - which is exactly what PostgreSQL asks when the
+`ON DELETE RESTRICT` on `show_seat_id` is checked. Without it, deleting a show
+seat scans every sale ever recorded.
+
+`bookings` gets no `cancelled_at`: status plus the existing `updated_at` trigger
+already record that a booking was cancelled and when, and that is the value the
+response returns. The column on `booking_seats` earns its place only because an
+index needs it.
+
+### State machine
+
+```
+booking:  confirmed ──> cancelled
+          cancelled is terminal
+
+seat:     available ──> held ──> booked ──> available
+```
+
+`cancelled -> confirmed` is not merely rejected: no statement anywhere performs
+it, and the UPDATE that cancels is guarded on `status = 'confirmed'`, so a
+second cancellation changes zero rows. That zero is treated as a refusal, never
+as success - which is what stops a seat being released twice.
+
+A repeated cancellation answers deliberately:
+
+| Second request | Answer |
+| --- | --- |
+| same `Idempotency-Key` | the original `200`, replayed byte for byte |
+| different key | `409 BOOKING_ALREADY_CANCELLED` |
+
+### What moves and what does not
+
+```
+bookings.status         confirmed -> cancelled
+booking_seats           rows stay; only cancelled_at is stamped
+booking_seats.price     untouched - a historical snapshot
+bookings.total_amount   untouched, for the same reason
+bookings.currency       untouched
+show_seats.status       booked -> available
+reservation_holds       untouched
+```
+
+Seat rows are **never deleted**. They are the record of what was sold and at
+what price; the timestamp only drops them out of the partial unique index so the
+seat can be sold again. Both sales stay visible afterwards.
+
+### The hold stays converted
+
+Cancelling a booking is not undoing the confirmation that created it. The hold
+was consumed when the booking was made, and `converted` is terminal. Rewinding
+it to `active` would resurrect a reservation nobody asked for, with an
+`expires_at` long past, and hand the seats to a hold whose owner has just given
+them up.
+
+After confirmation the **booking** owns the seats. The booking - and only the
+booking - releases them.
+
+### The transaction
+
+Everything commits together or not at all:
+
+```
+BEGIN                            (owned by the idempotency wrapper)
+  claim idempotency key
+  lock the booking FOR UPDATE
+  verify: exists, owned by caller
+  verify: status = confirmed
+  lock its live seats FOR UPDATE, ascending id   (one statement)
+  verify: every seat is still booked
+  booking -> cancelled           (guarded on status = 'confirmed')
+  booking_seats.cancelled_at = now()             (one statement)
+  show_seats -> available        (guarded on status = 'booked')
+  store the idempotency response
+COMMIT
+```
+
+The booking transitions **before** any seat is released, so there is no instant -
+not even inside the transaction - where a seat is free while its booking still
+claims it. Every guarded UPDATE's affected-row count is compared against what
+was locked, and a mismatch aborts the whole thing rather than half-releasing.
+
+Set-based throughout: one statement to lock the seats, one to retire the seat
+rows, one to release the inventory, whether the booking has one seat or ten.
+
+### Lock order
+
+Cancellation extends the global order rather than contradicting it:
+
+```
+idempotency_keys  ->  bookings  ->  show_seats (ascending id)  ->  reservation_holds
+```
+
+Confirmation takes seats and then the hold, and never locks an existing
+`bookings` row - it inserts one no other transaction can see. So `bookings` and
+`reservation_holds` sit on opposite sides of `show_seats` and no cycle is
+possible. The only table the four paths contend for is `show_seats`, and
+reservation, expiration, confirmation and cancellation all reach it in ascending
+id order.
+
+Locking the seats is not optional. A cancellation releasing seat A1 and a
+reservation wanting A1 must serialise, and
+
+```sql
+UPDATE show_seats SET status = 'available' WHERE id IN (...)
+```
+
+on its own would not make them. Under the lock, one of two things happens and
+nothing else: the reservation runs first, finds A1 booked and is refused; or the
+cancellation commits and the reservation then takes a genuinely free seat.
+
+### Ownership
+
+A booking that does not exist and a booking that is not yours return the **same
+404**. Answering `403` for the second would let anyone walk booking ids and
+learn which are real - and a real booking reference is a support-desk credential
+in most ticketing systems. The distinction is kept in the logs, where an
+operator can see it and an attacker cannot.
+
+### Refunds are deliberately outside this transaction
+
+No refund, no payment call, no webhook. That is not only scope: this transaction
+holds row locks on inventory other customers are queuing for, and an HTTP call
+to a payment provider inside those locks would hold them for the provider's
+latency and timeout rather than the database's.
+
+The boundary a payment layer would slot into:
+
+```
+cancel booking (this transaction, commits)
+    -> enqueue a refund intent
+        -> payment provider
+            -> refund webhook updates the refund record
+```
+
+Only the enqueue step joins this transaction, and it would join it the way hold
+expiration already does - an outbox row written here and drained by a worker
+afterwards. Nothing external is called while a lock is held.
+
+### What actually provides the protection
+
+Worth being precise about, because the layers are not equally load-bearing.
+Each was removed in turn and the concurrency suites re-run:
+
+| Removed | Result |
+| --- | --- |
+| `FOR UPDATE` on `bookings` | 9 of 50 racing cancellations read a stale `confirmed`, fell through to the seat check and answered `CANCELLATION_CONFLICT` instead of `BOOKING_ALREADY_CANCELLED`. No corruption - but the wrong layer catching it, and the tests said so. |
+| `AND status = 'confirmed'` on the UPDATE | Nothing observable. With the row lock and the service check both intact, the SQL guard is a backstop, not the primary defence. |
+| the service's already-cancelled check | Every retry answered `409 BOOKING_INVALID`. Detected. |
+| both of the above | The seat check caught it: `409 CANCELLATION_CONFLICT`, still no corruption. |
+| all three, plus the seat check | **Corruption.** All 50 concurrent cancellations answered `200`, and a booking already cancelled and resold cancelled again. Four tests failed. |
+| `booking_seats_live_show_seat_key` | Every service-level test still passed. The index only shows itself when rows are written straight to the table, which is exactly what the invariant test does. |
+
+So: the **row lock** decides the answer, the **guarded UPDATEs and the seat
+check** prevent the corruption, and the **partial unique index** is the backstop
+for anything that bypasses the service. Each implementation was restored
+byte-for-byte afterwards.
 
 ## Hold expiration
 
@@ -1009,11 +1226,16 @@ npm run migrate:up
 npm test
 ```
 
-Two suites deserve mention. `rate-limit.distributed.test.ts` spawns **two real
+Three suites deserve mention. `rate-limit.distributed.test.ts` spawns **two real
 API processes** against one Redis and alternates requests between them, which is
 the only way to tell a shared counter from a process-local one.
 `redis.failure.test.ts` drops the connection mid-suite to prove the fail-closed
 policy holds and that no Redis detail reaches a client.
+`booking-cancel.concurrency.test.ts` fires 50 simultaneous cancellations at one
+booking and races cancellation against reservation, confirmation and the
+expiration worker; the races are jittered so both outcomes actually occur rather
+than one side always winning on timing, and each round re-checks the same set of
+cross-table invariants.
 
 Rate limits are live during tests. Rather than disabling the middleware, each
 suite presents a distinct `X-Forwarded-For` so its identifiers are isolated;

@@ -63,3 +63,28 @@ export function hashConfirmRequest(fingerprint: ConfirmRequestFingerprint): stri
 
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
+
+/**
+ * The fields that identify one cancellation request.
+ *
+ * No event id here, unlike confirmation: the cancellation URL is
+ * /bookings/:bookingId/cancel and a booking id is globally unique, so the event
+ * would be a derived value rather than part of what the caller asked for.
+ * Including it would also mean a caller could not retry without re-deriving it.
+ */
+export interface CancelRequestFingerprint {
+  userId: string;
+  bookingId: string;
+}
+
+/** Versioned and tagged separately, so no two operations can share a digest. */
+export function hashCancelRequest(fingerprint: CancelRequestFingerprint): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: 'cancel-booking',
+    userId: fingerprint.userId,
+    bookingId: fingerprint.bookingId,
+  });
+
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}

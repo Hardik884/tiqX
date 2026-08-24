@@ -31,7 +31,7 @@ and intentionally contain no code yet.
 | `events`        | movies and concerts scheduled at a venue        |
 | `seats`         | per-event seat inventory (`show_seats`)         |
 | `reservations`  | temporary seat holds (`reservation_holds`)      |
-| `bookings`      | confirming a hold into a durable booking        |
+| `bookings`      | confirming a hold into a durable booking, and cancelling one |
 | `waitlist`      | queueing for sold-out events                    |
 | `notifications` | email and in-app notifications                  |
 | `analytics`     | reporting for organisers and admins             |
