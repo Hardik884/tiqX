@@ -6,13 +6,16 @@ import {
   createEventSchema,
   eventIdParamsSchema,
   organiserEventListQuerySchema,
+  publicEventListQuerySchema,
   updateEventSchema,
 } from './event.schema.js';
 import {
   createEvent,
   deleteEvent,
   getEventById,
+  getPublicSeatMap,
   listOrganiserEvents,
+  listPublicEvents,
   publishEvent,
   updateEvent,
 } from './event.service.js';
@@ -52,6 +55,7 @@ export async function createEventHandler(req: Request, res: Response): Promise<v
     venueId: body.venueId,
     title: body.title,
     description: body.description,
+    category: body.category,
     eventType: body.eventType,
     startsAt: new Date(body.startsAt),
     endsAt: new Date(body.endsAt),
@@ -115,6 +119,7 @@ export async function updateEventHandler(req: Request, res: Response): Promise<v
       userRole,
       title: body.data.title,
       description: body.data.description,
+      category: body.data.category,
       startsAt: body.data.startsAt === undefined ? undefined : new Date(body.data.startsAt),
       endsAt: body.data.endsAt === undefined ? undefined : new Date(body.data.endsAt),
     },
@@ -167,5 +172,54 @@ export async function listOrganiserEventsHandler(req: Request, res: Response): P
   });
 
   res.status(200).json(result);
+}
+
+/**
+ * GET /api/v1/events - public discovery. Anonymous by design: this route runs
+ * behind `optionalAuth`, not `requireAuth`, the same as the single-event GET.
+ * `req.user`, if present, is currently unused here - visibility for the *list*
+ * is `status <> 'draft'` regardless of who is asking, matching
+ * `listPublicEvents`'s documented reasoning - but accepting it costs nothing
+ * and keeps this route's shape consistent with the one that does need it.
+ */
+export async function listPublicEventsHandler(req: Request, res: Response): Promise<void> {
+  const parsed = publicEventListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw new BadRequestError('Invalid query parameters', toFieldErrors(parsed.error.issues));
+  }
+
+  const query = parsed.data;
+
+  const result = await listPublicEvents({
+    filters: {
+      q: query.q,
+      category: query.category,
+      eventType: query.eventType,
+      city: query.city,
+      venueId: query.venueId,
+      startFrom: query.startFrom === undefined ? undefined : new Date(query.startFrom),
+      startTo: query.startTo === undefined ? undefined : new Date(query.startTo),
+    },
+    sort: query.sort,
+    limit: query.limit,
+    cursor: query.decodedCursor,
+  });
+
+  res.status(200).json(result);
+}
+
+/**
+ * GET /api/v1/events/:eventId/seats - the public seat map. Same optional
+ * identity, same visibility rule, as the event itself - see `getPublicSeatMap`.
+ */
+export async function getPublicSeatMapHandler(req: Request, res: Response): Promise<void> {
+  const eventId = parseEventId(req);
+
+  const seats = await getPublicSeatMap(
+    eventId,
+    req.user === undefined ? undefined : { userId: req.user.id, userRole: req.user.role },
+  );
+
+  res.status(200).json({ seats });
 }
 

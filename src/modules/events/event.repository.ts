@@ -1,5 +1,12 @@
 import type { Queryable } from '../../db/pool.js';
-import type { CreateEventInput, EventRecord, EventStatus, EventType } from './event.types.js';
+import type {
+  CreateEventInput,
+  EventCategory,
+  EventRecord,
+  EventSortMode,
+  EventStatus,
+  EventType,
+} from './event.types.js';
 
 interface EventRow {
   id: string;
@@ -7,6 +14,7 @@ interface EventRow {
   venue_id: string;
   title: string;
   description: string | null;
+  category: EventCategory;
   event_type: EventType;
   starts_at: Date;
   ends_at: Date;
@@ -23,6 +31,7 @@ function toEventRecord(row: EventRow): EventRecord {
     venueId: row.venue_id,
     title: row.title,
     description: row.description,
+    category: row.category,
     eventType: row.event_type,
     startsAt: row.starts_at,
     endsAt: row.ends_at,
@@ -35,14 +44,15 @@ function toEventRecord(row: EventRow): EventRecord {
 
 export async function insertEvent(db: Queryable, input: CreateEventInput): Promise<EventRecord> {
   const result = await db.query<EventRow>(
-    `INSERT INTO events (organiser_id, venue_id, title, description, event_type, starts_at, ends_at, status, currency)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'draft'), COALESCE($9, 'INR'))
+    `INSERT INTO events (organiser_id, venue_id, title, description, category, event_type, starts_at, ends_at, status, currency)
+     VALUES ($1, $2, $3, $4, COALESCE($5, 'other'), $6, $7, $8, COALESCE($9, 'draft'), COALESCE($10, 'INR'))
      RETURNING *`,
     [
       input.organiserId,
       input.venueId,
       input.title,
       input.description ?? null,
+      input.category ?? null,
       input.eventType,
       input.startsAt,
       input.endsAt,
@@ -59,19 +69,17 @@ export async function insertEvent(db: Queryable, input: CreateEventInput): Promi
   return toEventRecord(row);
 }
 
-/** An event joined with the one venue field the public view needs: its name. */
-export interface EventWithVenueName {
+/** An event joined with the venue fields the public view needs: its name and city. */
+export interface EventWithVenue {
   event: EventRecord;
   venueName: string;
+  venueCity: string | null;
 }
 
 /** Unlocked read for the public/private GET - nothing here is about to change it. */
-export async function findEventWithVenueName(
-  db: Queryable,
-  eventId: string,
-): Promise<EventWithVenueName | null> {
-  const result = await db.query<EventRow & { venue_name: string }>(
-    `SELECT e.*, v.name AS venue_name
+export async function findEventWithVenue(db: Queryable, eventId: string): Promise<EventWithVenue | null> {
+  const result = await db.query<EventRow & { venue_name: string; venue_city: string | null }>(
+    `SELECT e.*, v.name AS venue_name, v.city AS venue_city
      FROM events e
      JOIN venues v ON v.id = e.venue_id
      WHERE e.id = $1`,
@@ -79,10 +87,10 @@ export async function findEventWithVenueName(
   );
 
   const row = result.rows[0];
-  return row ? { event: toEventRecord(row), venueName: row.venue_name } : null;
+  return row ? { event: toEventRecord(row), venueName: row.venue_name, venueCity: row.venue_city } : null;
 }
 
-/** How many of an event's seats are still available - the public headline number. */
+/** How many of an event's seats are still available - used only where a bare count is enough (the publish guard). */
 export async function countAvailableSeats(db: Queryable, eventId: string): Promise<number> {
   const result = await db.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM show_seats WHERE event_id = $1 AND status = 'available'`,
@@ -91,31 +99,55 @@ export async function countAvailableSeats(db: Queryable, eventId: string): Promi
   return Number(result.rows[0]!.count);
 }
 
+export interface SeatSummary {
+  availableSeats: number;
+  /** The lowest price among currently available seats, or null if none are available. */
+  startingPrice: string | null;
+}
+
+const EMPTY_SEAT_SUMMARY: SeatSummary = { availableSeats: 0, startingPrice: null };
+
 /**
- * Available-seat counts for a whole page of events in one statement.
+ * Availability and starting price for a whole page of events, in one
+ * statement.
  *
- * Used by the organiser listing instead of one `countAvailableSeats` call per
- * row: a page of, say, 20 events must not become 20 round trips just to fill
- * in a summary number. Events with no available seats (or no seats at all)
- * are simply absent from the result and read back as 0.
+ * Used everywhere an event view is built instead of one query per row: a
+ * page of, say, 20 events must not become 20 round trips to fill in two
+ * summary numbers. Events with no available seats (or no seats at all) are
+ * simply absent from the result and read back as the zero/null default.
+ *
+ * `MIN(price)` is computed by PostgreSQL over the NUMERIC column and read
+ * back as the string PostgreSQL returns - never summed, divided or otherwise
+ * touched by JavaScript arithmetic.
  */
-export async function countAvailableSeatsForEvents(
+export async function getSeatSummaryForEvents(
   db: Queryable,
   eventIds: readonly string[],
-): Promise<Map<string, number>> {
+): Promise<Map<string, SeatSummary>> {
   if (eventIds.length === 0) {
     return new Map();
   }
 
-  const result = await db.query<{ event_id: string; count: string }>(
-    `SELECT event_id, count(*)::text AS count
+  const result = await db.query<{ event_id: string; count: string; min_price: string | null }>(
+    `SELECT event_id, count(*)::text AS count, min(price)::text AS min_price
      FROM show_seats
      WHERE event_id = ANY($1::uuid[]) AND status = 'available'
      GROUP BY event_id`,
     [eventIds],
   );
 
-  return new Map(result.rows.map((row) => [row.event_id, Number(row.count)]));
+  return new Map(
+    result.rows.map((row) => [
+      row.event_id,
+      { availableSeats: Number(row.count), startingPrice: row.min_price },
+    ]),
+  );
+}
+
+/** Convenience wrapper over {@link getSeatSummaryForEvents} for a single event. */
+export async function getSeatSummaryForEvent(db: Queryable, eventId: string): Promise<SeatSummary> {
+  const summaries = await getSeatSummaryForEvents(db, [eventId]);
+  return summaries.get(eventId) ?? EMPTY_SEAT_SUMMARY;
 }
 
 export interface LockedEvent {
@@ -145,6 +177,7 @@ export async function lockEventForOwnership(db: Queryable, eventId: string): Pro
 export interface EventFieldUpdate {
   title?: string | undefined;
   description?: string | undefined;
+  category?: EventCategory | undefined;
   startsAt?: Date | undefined;
   endsAt?: Date | undefined;
 }
@@ -173,11 +206,19 @@ export async function updateEventFields(
     `UPDATE events
      SET title = COALESCE($2, title),
          description = COALESCE($3, description),
-         starts_at = COALESCE($4, starts_at),
-         ends_at = COALESCE($5, ends_at)
+         category = COALESCE($4, category),
+         starts_at = COALESCE($5, starts_at),
+         ends_at = COALESCE($6, ends_at)
      WHERE id = $1
      RETURNING *`,
-    [eventId, patch.title ?? null, patch.description ?? null, patch.startsAt ?? null, patch.endsAt ?? null],
+    [
+      eventId,
+      patch.title ?? null,
+      patch.description ?? null,
+      patch.category ?? null,
+      patch.startsAt ?? null,
+      patch.endsAt ?? null,
+    ],
   );
 
   const row = result.rows[0];
@@ -255,17 +296,17 @@ export async function countEventsForListing(db: Queryable, organiserId: string |
 export async function listEventsPage(
   db: Queryable,
   { organiserId, page, limit }: ListEventsPage,
-): Promise<EventWithVenueName[]> {
+): Promise<EventWithVenue[]> {
   const offset = (page - 1) * limit;
 
-  const result = await db.query<EventRow & { venue_name: string }>(
+  const result = await db.query<EventRow & { venue_name: string; venue_city: string | null }>(
     organiserId === null
-      ? `SELECT e.*, v.name AS venue_name
+      ? `SELECT e.*, v.name AS venue_name, v.city AS venue_city
          FROM events e
          JOIN venues v ON v.id = e.venue_id
          ORDER BY e.created_at DESC, e.id DESC
          LIMIT $1 OFFSET $2`
-      : `SELECT e.*, v.name AS venue_name
+      : `SELECT e.*, v.name AS venue_name, v.city AS venue_city
          FROM events e
          JOIN venues v ON v.id = e.venue_id
          WHERE e.organiser_id = $1
@@ -274,5 +315,169 @@ export async function listEventsPage(
     organiserId === null ? [limit, offset] : [organiserId, limit, offset],
   );
 
-  return result.rows.map((row) => ({ event: toEventRecord(row), venueName: row.venue_name }));
+  return result.rows.map((row) => ({
+    event: toEventRecord(row),
+    venueName: row.venue_name,
+    venueCity: row.venue_city,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Public discovery: GET /api/v1/events
+// ---------------------------------------------------------------------------
+
+/**
+ * The entire sort surface, fixed at compile time.
+ *
+ * This is what "never accept raw SQL through `sort`" actually means in code:
+ * the API's `sort` value is used only as a *key into this object*, and every
+ * value it can produce is a hand-written literal that never touches user
+ * input. `keyColumn` is what the keyset predicate compares against; `castKey`
+ * says how to turn a cursor's string `key` back into the right bound
+ * parameter type for that column.
+ */
+const SORT_CONFIG: Record<
+  EventSortMode,
+  { orderBy: string; keyColumn: string; direction: 'ASC' | 'DESC'; castKey: (key: string) => string | Date }
+> = {
+  start_asc: {
+    orderBy: 'e.starts_at ASC, e.id ASC',
+    keyColumn: 'e.starts_at',
+    direction: 'ASC',
+    castKey: (key) => new Date(key),
+  },
+  start_desc: {
+    orderBy: 'e.starts_at DESC, e.id DESC',
+    keyColumn: 'e.starts_at',
+    direction: 'DESC',
+    castKey: (key) => new Date(key),
+  },
+  name_asc: {
+    orderBy: 'e.title ASC, e.id ASC',
+    keyColumn: 'e.title',
+    direction: 'ASC',
+    castKey: (key) => key,
+  },
+  name_desc: {
+    orderBy: 'e.title DESC, e.id DESC',
+    keyColumn: 'e.title',
+    direction: 'DESC',
+    castKey: (key) => key,
+  },
+};
+
+export interface PublicEventFilters {
+  q?: string | undefined;
+  category?: EventCategory | undefined;
+  eventType?: EventType | undefined;
+  city?: string | undefined;
+  venueId?: string | undefined;
+  startFrom?: Date | undefined;
+  startTo?: Date | undefined;
+}
+
+export interface PublicEventQuery {
+  filters: PublicEventFilters;
+  sort: EventSortMode;
+  /** One page's worth *plus one* - see event.service.ts's `hasMore` detection. */
+  fetchLimit: number;
+  cursor: { key: string; id: string } | null;
+}
+
+/**
+ * The public discovery query: one statement, every filter a bound parameter,
+ * `sort` resolved only through {@link SORT_CONFIG}.
+ *
+ * VISIBILITY IS A SQL PREDICATE, NOT A JAVASCRIPT FILTER. `status <> 'draft'`
+ * is unconditional - the first condition, always present, never optional -
+ * so there is no code path through this function that can return a draft
+ * event. This is deliberate: "fetch everything, filter afterwards" would mean
+ * a bug in the filtering step leaks a draft; a predicate that is always part
+ * of the WHERE clause cannot be bypassed by forgetting to call something.
+ *
+ * `status <> 'draft'`, not `status = 'published'`: this list mirrors
+ * `getEventById`'s existing rule (only `draft` is hidden) for consistency
+ * with the model already established for the single-event endpoint, rather
+ * than inventing a stricter one - see the final report.
+ *
+ * TEXT SEARCH is two independent conditions, OR'd: the generated
+ * `search_vector` column (title/category/description, GIN-indexed) for the
+ * fields that live on `events`, and a plain `ILIKE` against `venues.name` for
+ * the one field that does not. Folding venue name into the same tsvector
+ * would mean denormalising it onto `events` and keeping it in sync with a
+ * trigger every time a venue is renamed - real, ongoing complexity - for a
+ * table (`venues`) small enough that `ILIKE` over it, joined in, costs
+ * nothing at any realistic scale. See the migration and the final report for
+ * the full comparison against trigram search.
+ */
+export async function findPublicEventsPage(
+  db: Queryable,
+  { filters, sort, fetchLimit, cursor }: PublicEventQuery,
+): Promise<EventWithVenue[]> {
+  const config = SORT_CONFIG[sort];
+  const conditions: string[] = [`e.status <> 'draft'`];
+  const params: unknown[] = [];
+
+  function bind(value: unknown): number {
+    params.push(value);
+    return params.length;
+  }
+
+  if (filters.category !== undefined) {
+    conditions.push(`e.category = $${bind(filters.category)}`);
+  }
+  if (filters.eventType !== undefined) {
+    conditions.push(`e.event_type = $${bind(filters.eventType)}`);
+  }
+  if (filters.venueId !== undefined) {
+    conditions.push(`e.venue_id = $${bind(filters.venueId)}`);
+  }
+  if (filters.city !== undefined) {
+    // Exact, case-insensitive match - a city is a filter value a client picks
+    // from a list, not free text to search within. See event.service.ts.
+    conditions.push(`lower(v.city) = lower($${bind(filters.city)})`);
+  }
+  if (filters.startFrom !== undefined) {
+    conditions.push(`e.starts_at >= $${bind(filters.startFrom)}`);
+  }
+  if (filters.startTo !== undefined) {
+    conditions.push(`e.starts_at <= $${bind(filters.startTo)}`);
+  }
+  if (filters.q !== undefined) {
+    const qParam = bind(filters.q);
+    const likeParam = bind(`%${filters.q}%`);
+    conditions.push(
+      `(e.search_vector @@ websearch_to_tsquery('english', $${qParam}) OR v.name ILIKE $${likeParam})`,
+    );
+  }
+
+  if (cursor !== null) {
+    const keyParam = bind(config.castKey(cursor.key));
+    const idParam = bind(cursor.id);
+    const op = config.direction === 'ASC' ? '>' : '<';
+    // Standard keyset predicate: strictly past the last row of the previous
+    // page, by the sort's own ordering, with `id` breaking a tie on the
+    // primary key exactly the way the `ORDER BY` does.
+    conditions.push(
+      `(${config.keyColumn} ${op} $${keyParam} OR (${config.keyColumn} = $${keyParam} AND e.id ${op} $${idParam}))`,
+    );
+  }
+
+  const limitParam = bind(fetchLimit);
+
+  const result = await db.query<EventRow & { venue_name: string; venue_city: string | null }>(
+    `SELECT e.*, v.name AS venue_name, v.city AS venue_city
+     FROM events e
+     JOIN venues v ON v.id = e.venue_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY ${config.orderBy}
+     LIMIT $${limitParam}`,
+    params,
+  );
+
+  return result.rows.map((row) => ({
+    event: toEventRecord(row),
+    venueName: row.venue_name,
+    venueCity: row.venue_city,
+  }));
 }

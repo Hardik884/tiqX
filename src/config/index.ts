@@ -116,6 +116,13 @@ const envSchema = z.object({
   // rate-limit.ts.
   RATE_LIMIT_TICKET_VERIFY_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_TICKET_VERIFY_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  // Public event search: unauthenticated, so keyed on IP. Generous relative to
+  // login/register - browsing and refining a search is normal single-visitor
+  // behaviour, not an attack pattern - but bounded, since it is the one public
+  // endpoint whose query (multi-filter, full-text) is the most expensive read
+  // in this API to let someone hammer for free.
+  RATE_LIMIT_SEARCH_MAX: z.coerce.number().int().positive().default(60),
+  RATE_LIMIT_SEARCH_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
 
   // ---------------------------------------------------------------------------
   // Hold expiration worker
@@ -194,6 +201,11 @@ export const config = {
       name: 'ticket-verify',
       max: env.RATE_LIMIT_TICKET_VERIFY_MAX,
       windowSeconds: env.RATE_LIMIT_TICKET_VERIFY_WINDOW_SECONDS,
+    },
+    search: {
+      name: 'search',
+      max: env.RATE_LIMIT_SEARCH_MAX,
+      windowSeconds: env.RATE_LIMIT_SEARCH_WINDOW_SECONDS,
     },
   },
   expiration: {

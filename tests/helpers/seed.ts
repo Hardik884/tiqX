@@ -52,10 +52,11 @@ export async function seedVenue(
   seatCount: number,
   rowLabel = 'A',
   firstSeatNumber = 1,
+  city: string | null = null,
 ): Promise<SeededVenue> {
   const venue = await query<IdRow>(
-    `INSERT INTO venues (name, description) VALUES ($1, $2) RETURNING id`,
-    [`Test Venue ${randomUUID()}`, 'Created by the test suite'],
+    `INSERT INTO venues (name, description, city) VALUES ($1, $2, $3) RETURNING id`,
+    [`Test Venue ${randomUUID()}`, 'Created by the test suite', city],
   );
 
   const venueId = venue.rows[0]!.id;

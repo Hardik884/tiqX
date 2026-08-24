@@ -73,9 +73,12 @@ describe('GET /api/v1/events/:eventId - public vs private', () => {
     assert.equal(reply.json.status, 'published');
     assert.ok((reply.json.venue as { name?: string })?.name);
     assert.equal(typeof reply.json.availableSeats, 'number');
-    // Private-only fields must not leak.
+    // `currency` is public, not private: added by the event-discovery task
+    // alongside `startingPrice` - a price with no stated currency is
+    // ambiguous, so anywhere a price is shown, the currency must be too.
+    assert.ok(reply.json.currency);
+    // Private-only fields must still not leak.
     assert.equal(reply.json.organiserId, undefined);
-    assert.equal(reply.json.currency, undefined);
     assert.equal(reply.json.createdAt, undefined);
     void organiserId;
   });

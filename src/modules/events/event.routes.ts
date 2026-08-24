@@ -1,18 +1,31 @@
 import { Router } from 'express';
 
+import { config } from '../../config/index.js';
 import { optionalAuth, requireAuth } from '../../middleware/authenticate.js';
 import { requireRole } from '../../middleware/authorize.js';
+import { rateLimit } from '../../middleware/rate-limit.js';
 import { reservationRouter } from '../reservations/reservation.routes.js';
 import {
   createEventHandler,
   deleteEventHandler,
   getEventHandler,
+  getPublicSeatMapHandler,
   listOrganiserEventsHandler,
+  listPublicEventsHandler,
   publishEventHandler,
   updateEventHandler,
 } from './event.controller.js';
 
 export const eventRouter = Router();
+
+// GET /api/v1/events - public discovery. Mounted first and matched only on
+// an exact empty path, so it cannot be confused with `/:eventId` below.
+// Rate limited per IP - see rate-limit.ts and config.rateLimit.search - since
+// this is the one event endpoint anonymous traffic can call at volume with no
+// identity to key on yet; the detail and seat-map reads are not, matching how
+// the rest of this API only limits the endpoints with a demonstrated abuse
+// shape rather than blanket-limiting every GET.
+eventRouter.get('/', rateLimit(config.rateLimit.search, 'ip'), listPublicEventsHandler);
 
 // Identity first, then permission, then the handler. Selling tickets is an
 // organiser's job; admins are included because they administer the same
@@ -28,6 +41,12 @@ eventRouter.post('/', requireAuth, requireRole('organiser', 'admin'), createEven
 // decides how much of the event to reveal from whatever identity, if any, it
 // finds there.
 eventRouter.get('/:eventId', optionalAuth, getEventHandler);
+
+// GET /api/v1/events/:eventId/seats - the public seat map, same visibility
+// rule as the event itself. Read-only: nothing under this route can create a
+// hold, change a seat's status, or touch a booking - see
+// show-seat.repository.ts::findPublicSeatMap.
+eventRouter.get('/:eventId/seats', optionalAuth, getPublicSeatMapHandler);
 
 // PATCH/DELETE/publish all require identity and the organiser/admin role, the
 // same coarse gate as creation. Ownership of *this* event is, again, the

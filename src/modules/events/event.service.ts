@@ -4,31 +4,39 @@ import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { pool, withTransaction } from '../../db/pool.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
-import { createShowSeatsForEvent } from '../seats/show-seat.repository.js';
+import { createShowSeatsForEvent, findPublicSeatMap } from '../seats/show-seat.repository.js';
 import { listVenueSeatIds, venueExists } from '../venues/venue.repository.js';
+import { encodeEventCursor } from './event.schema.js';
 import {
   countAvailableSeats,
-  countAvailableSeatsForEvents,
   countEventsForListing,
   deleteEventRow,
-  findEventWithVenueName,
+  findEventWithVenue,
+  findPublicEventsPage,
+  getSeatSummaryForEvent,
+  getSeatSummaryForEvents,
   hasEventHistory,
   insertEvent,
   listEventsPage,
   lockEventForOwnership,
   markEventPublished,
   updateEventFields,
-  type EventWithVenueName,
+  type EventWithVenue,
   type LockedEvent,
+  type SeatSummary,
 } from './event.repository.js';
 import type {
   CreateEventInput,
   DeleteEventInput,
+  EventCursor,
   EventRecord,
   ListOrganiserEventsInput,
   ListOrganiserEventsResult,
+  ListPublicEventsInput,
+  ListPublicEventsResult,
   PrivateEventView,
   PublicEventView,
+  PublicSeatMapEntry,
   PublishEventInput,
   RequestingUser,
   UpdateEventInput,
@@ -113,25 +121,27 @@ function eventNotFound(): NotFoundError {
   return new NotFoundError('Event not found', { reason: 'EVENT_NOT_FOUND' });
 }
 
-function toPublicView(record: EventWithVenueName, availableSeats: number): PublicEventView {
+function toPublicView(record: EventWithVenue, seats: SeatSummary): PublicEventView {
   return {
     id: record.event.id,
     title: record.event.title,
     description: record.event.description,
+    category: record.event.category,
     eventType: record.event.eventType,
     status: record.event.status,
     startsAt: record.event.startsAt,
     endsAt: record.event.endsAt,
-    venue: { id: record.event.venueId, name: record.venueName },
-    availableSeats,
+    venue: { id: record.event.venueId, name: record.venueName, city: record.venueCity },
+    currency: record.event.currency,
+    availableSeats: seats.availableSeats,
+    startingPrice: seats.startingPrice,
   };
 }
 
-function toPrivateView(record: EventWithVenueName, availableSeats: number): PrivateEventView {
+function toPrivateView(record: EventWithVenue, seats: SeatSummary): PrivateEventView {
   return {
-    ...toPublicView(record, availableSeats),
+    ...toPublicView(record, seats),
     organiserId: record.event.organiserId,
-    currency: record.event.currency,
     createdAt: record.event.createdAt,
     updatedAt: record.event.updatedAt,
   };
@@ -155,7 +165,7 @@ export async function getEventById(
   eventId: string,
   requester: RequestingUser | undefined,
 ): Promise<PublicEventView | PrivateEventView> {
-  const record = await findEventWithVenueName(pool, eventId);
+  const record = await findEventWithVenue(pool, eventId);
 
   if (record === null) {
     throw eventNotFound();
@@ -170,9 +180,9 @@ export async function getEventById(
     throw eventNotFound();
   }
 
-  const availableSeats = await countAvailableSeats(pool, eventId);
+  const seats = await getSeatSummaryForEvent(pool, eventId);
 
-  return privileged ? toPrivateView(record, availableSeats) : toPublicView(record, availableSeats);
+  return privileged ? toPrivateView(record, seats) : toPublicView(record, seats);
 }
 
 /**
@@ -182,7 +192,8 @@ export async function getEventById(
  * `status` are not accepted at all - see `updateEventSchema`, which is the
  * real enforcement; this function never sees them. Of what remains:
  *
- *   title, description   editable in `draft` or `published`, always.
+ *   title, description,
+ *   category              editable in `draft` or `published`, always.
  *   startsAt, endsAt      editable in `draft` or `published`, but only while
  *                         the event has never had a booking - a booking is a
  *                         customer's commitment to a specific showtime, and
@@ -262,6 +273,7 @@ export async function updateEventInTransaction(
     updated = await updateEventFields(client, input.eventId, {
       title: input.title,
       description: input.description,
+      category: input.category,
       startsAt: input.startsAt,
       endsAt: input.endsAt,
     });
@@ -522,16 +534,97 @@ export async function listOrganiserEvents(input: ListOrganiserEventsInput): Prom
   const total = await countEventsForListing(pool, organiserId);
   const page = await listEventsPage(pool, { organiserId, page: input.page, limit: input.limit });
 
-  const availableSeatsByEvent = await countAvailableSeatsForEvents(
+  const seatSummaryByEvent = await getSeatSummaryForEvents(
     pool,
     page.map((record) => record.event.id),
   );
 
   return {
-    events: page.map((record) => toPrivateView(record, availableSeatsByEvent.get(record.event.id) ?? 0)),
+    events: page.map((record) =>
+      toPrivateView(record, seatSummaryByEvent.get(record.event.id) ?? { availableSeats: 0, startingPrice: null }),
+    ),
     page: input.page,
     limit: input.limit,
     total,
     totalPages: Math.max(1, Math.ceil(total / input.limit)),
   };
+}
+
+/**
+ * Public discovery: `GET /api/v1/events`.
+ *
+ * KEYSET PAGINATION, DELIBERATELY, OVER OFFSET. `listOrganiserEvents` above
+ * uses offset/page for an organiser's own (typically small, slow-growing)
+ * list; this is the opposite shape - a public feed under continuous writes
+ * (events publish, seats sell) where OFFSET's two failures actually bite:
+ * a deep page costs PostgreSQL a scan-and-discard of every row before it,
+ * and a page can silently skip or repeat rows when the underlying set
+ * changes between requests. Keyset pagination - "give me rows strictly past
+ * this position" - costs the same at any depth and is stable under
+ * concurrent writes, which is exactly the environment public search runs in.
+ *
+ * `fetchLimit = limit + 1`: this is the standard trick for a keyset
+ * "hasMore" without a second COUNT query. If the extra row comes back, there
+ * is a next page; it is trimmed before the response and never itself part of
+ * `items`.
+ *
+ * The next cursor is built from the *last returned row of this page*, in the
+ * caller's own sort - never from `id` alone, and never assumed to be a
+ * timestamp when the sort is by name.
+ */
+export async function listPublicEvents(input: ListPublicEventsInput): Promise<ListPublicEventsResult> {
+  const fetchLimit = input.limit + 1;
+
+  const page = await findPublicEventsPage(pool, {
+    filters: input.filters,
+    sort: input.sort,
+    fetchLimit,
+    cursor: input.cursor === null ? null : { key: input.cursor.key, id: input.cursor.id },
+  });
+
+  const hasMore = page.length > input.limit;
+  const items = hasMore ? page.slice(0, input.limit) : page;
+
+  const seatSummaryByEvent = await getSeatSummaryForEvents(
+    pool,
+    items.map((record) => record.event.id),
+  );
+
+  const views = items.map((record) =>
+    toPublicView(record, seatSummaryByEvent.get(record.event.id) ?? { availableSeats: 0, startingPrice: null }),
+  );
+
+  const last = items[items.length - 1];
+  const nextCursor = hasMore && last !== undefined ? encodeEventCursor(sortKeyFor(input.sort, last)) : null;
+
+  return {
+    items: views,
+    pagination: { limit: input.limit, nextCursor, hasMore },
+  };
+}
+
+/** Builds the cursor pointing just past `record`, under `sort`. */
+function sortKeyFor(sort: ListPublicEventsInput['sort'], record: EventWithVenue): EventCursor {
+  const key = sort === 'name_asc' || sort === 'name_desc' ? record.event.title : record.event.startsAt.toISOString();
+  return { v: 1, sort, key, id: record.event.id };
+}
+
+/**
+ * The public seat map: `GET /api/v1/events/:eventId/seats`.
+ *
+ * Visibility is the same rule as `getEventById`, applied first and
+ * separately - a draft event's seat map must be exactly as invisible as the
+ * event itself, to exactly the same audience. This calls `getEventById`
+ * rather than re-deriving that rule, so there is one place, not two, that
+ * decides who may see a draft.
+ *
+ * Never a hold id, hold owner, user id or reservation id - only what a public
+ * seat picker needs to render a map and let a customer choose a seat.
+ */
+export async function getPublicSeatMap(
+  eventId: string,
+  requester: RequestingUser | undefined,
+): Promise<PublicSeatMapEntry[]> {
+  await getEventById(eventId, requester);
+  return findPublicSeatMap(pool, eventId);
 }

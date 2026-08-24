@@ -1,5 +1,5 @@
 import type { Queryable } from '../../db/pool.js';
-import type { SeatPricing } from '../events/event.types.js';
+import type { PublicSeatMapEntry, SeatPricing } from '../events/event.types.js';
 
 /**
  * Creates the initial inventory row for each given physical seat.
@@ -39,4 +39,41 @@ export async function createShowSeatsForEvent(
   );
 
   return result.rowCount ?? 0;
+}
+
+/**
+ * The public seat map for one event: every seat's row/number/price/status,
+ * ordered the way a seat picker renders a map.
+ *
+ * Deliberately narrow. `show_seats` and `reservation_holds` together know
+ * exactly who holds a seat and until when, but none of that is public: a
+ * `status` of `held` is all a customer ever needs to know, never whose hold
+ * it is or when it expires. This query does not join `reservation_holds` or
+ * `bookings` at all, so there is no column here that *could* leak a hold id,
+ * a hold owner or a booking - the omission is structural, not a filter that
+ * could be forgotten.
+ */
+export async function findPublicSeatMap(db: Queryable, eventId: string): Promise<PublicSeatMapEntry[]> {
+  const result = await db.query<{
+    id: string;
+    row_label: string;
+    seat_number: number;
+    price: string;
+    status: 'available' | 'held' | 'booked';
+  }>(
+    `SELECT ss.id, vs.row_label, vs.seat_number, ss.price::text AS price, ss.status
+     FROM show_seats ss
+     JOIN venue_seats vs ON vs.id = ss.venue_seat_id
+     WHERE ss.event_id = $1
+     ORDER BY vs.row_label, vs.seat_number`,
+    [eventId],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    rowLabel: row.row_label,
+    seatNumber: row.seat_number,
+    price: row.price,
+    status: row.status,
+  }));
 }

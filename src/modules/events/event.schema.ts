@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-import { EVENT_STATUSES, EVENT_TYPES, SEAT_CATEGORIES } from './event.types.js';
+import {
+  EVENT_CATEGORIES,
+  EVENT_SORT_MODES,
+  EVENT_STATUSES,
+  EVENT_TYPES,
+  SEAT_CATEGORIES,
+} from './event.types.js';
+import type { EventCursor } from './event.types.js';
 
 /**
  * `organiserId` is absent for the same reason `userId` is absent from the hold
@@ -15,6 +22,11 @@ export const createEventSchema = z
     venueId: z.uuid(),
     title: z.string().trim().min(1).max(200),
     description: z.string().trim().max(2000).optional(),
+    // Optional, defaulting to 'other' server-side (see insertEvent): making it
+    // mandatory would be a breaking change to every existing caller of this
+    // endpoint for a field that only public discovery, added in this task,
+    // actually needs.
+    category: z.enum(EVENT_CATEGORIES).optional(),
     eventType: z.enum(EVENT_TYPES),
     startsAt: z.iso.datetime({ offset: true }),
     endsAt: z.iso.datetime({ offset: true }),
@@ -56,6 +68,7 @@ export const updateEventSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),
     description: z.string().trim().max(2000).optional(),
+    category: z.enum(EVENT_CATEGORIES).optional(),
     startsAt: z.iso.datetime({ offset: true }).optional(),
     endsAt: z.iso.datetime({ offset: true }).optional(),
   })
@@ -90,3 +103,106 @@ export const organiserEventListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(DEFAULT_PAGE_LIMIT),
   all: booleanFromQuery.default(false),
 });
+
+// ---------------------------------------------------------------------------
+// Public discovery: GET /api/v1/events
+// ---------------------------------------------------------------------------
+
+/** Current cursor format. Bumping this the day the shape ever changes makes an old cursor fail cleanly instead of being misread. */
+const CURSOR_VERSION = 1 as const;
+
+const eventCursorPayloadSchema = z.object({
+  v: z.literal(CURSOR_VERSION),
+  sort: z.enum(EVENT_SORT_MODES),
+  key: z.string().min(1),
+  id: z.uuid(),
+});
+
+export function encodeEventCursor(cursor: EventCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+/**
+ * Decodes and validates a cursor, or returns null for "no cursor" - the
+ * first page. Every failure mode (not base64url, not JSON, wrong shape,
+ * wrong version) collapses to the same outcome for the caller: `null` paired
+ * with `ok: false`, so a 400 is returned without ever surfacing a parser
+ * exception or stack trace - see `publicEventListQuerySchema` for where that
+ * becomes the actual HTTP response.
+ *
+ * Deliberately unsigned. The cursor is opaque but is not a trust boundary: it
+ * encodes a pagination *position* (a value already visible in the previous
+ * page's own results), never an authorization decision, and the same
+ * visibility predicates are re-applied on every request regardless of what a
+ * cursor claims. A forged cursor can only make the query start somewhere
+ * unexpected in an otherwise-identical, identically-authorized result set -
+ * exactly what a client could already do by hand-crafting `startFrom`.
+ * Signing it would add a second use of the JWT secret (or a new one) to guard
+ * against a threat that does not exist here.
+ */
+function decodeEventCursor(raw: string): { ok: true; cursor: EventCursor } | { ok: false } {
+  let parsed: unknown;
+  try {
+    const json = Buffer.from(raw, 'base64url').toString('utf8');
+    parsed = JSON.parse(json);
+  } catch {
+    return { ok: false };
+  }
+
+  const result = eventCursorPayloadSchema.safeParse(parsed);
+  return result.success ? { ok: true, cursor: result.data } : { ok: false };
+}
+
+const searchTextSchema = z.string().trim().min(1).max(200);
+const citySchema = z.string().trim().min(1).max(100);
+
+/**
+ * `sort` and `cursor` are validated together, not independently: a cursor
+ * minted under `start_asc` must not be silently reinterpreted under
+ * `name_desc`. Decoding happens here, in the schema, so the service only ever
+ * sees either a fully-validated `EventCursor` bound to the requested sort, or
+ * a 400 that never reaches it.
+ */
+export const publicEventListQuerySchema = z
+  .object({
+    q: searchTextSchema.optional(),
+    category: z.enum(EVENT_CATEGORIES).optional(),
+    eventType: z.enum(EVENT_TYPES).optional(),
+    city: citySchema.optional(),
+    venueId: z.uuid().optional(),
+    startFrom: z.iso.datetime({ offset: true }).optional(),
+    startTo: z.iso.datetime({ offset: true }).optional(),
+    sort: z.enum(EVENT_SORT_MODES).default('start_asc'),
+    limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(DEFAULT_PAGE_LIMIT),
+    cursor: z.string().max(2000).optional(),
+  })
+  .refine(
+    (value) =>
+      value.startFrom === undefined ||
+      value.startTo === undefined ||
+      new Date(value.startFrom) <= new Date(value.startTo),
+    { message: 'startFrom must not be after startTo', path: ['startTo'] },
+  )
+  .transform((value, ctx) => {
+    if (value.cursor === undefined) {
+      return { ...value, decodedCursor: null as EventCursor | null };
+    }
+
+    const decoded = decodeEventCursor(value.cursor);
+    if (!decoded.ok) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid cursor', path: ['cursor'] });
+      return z.NEVER;
+    }
+
+    if (decoded.cursor.sort !== value.sort) {
+      // A cursor is bound to the sort it was minted under - reusing one
+      // against a different sort would silently reinterpret `key` as the
+      // wrong column's value.
+      ctx.addIssue({ code: 'custom', message: 'Cursor does not match the requested sort', path: ['cursor'] });
+      return z.NEVER;
+    }
+
+    return { ...value, decodedCursor: decoded.cursor };
+  });
+
+export type PublicEventListQuery = z.infer<typeof publicEventListQuerySchema>;
