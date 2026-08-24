@@ -71,6 +71,54 @@ export async function requireAuth(
 }
 
 /**
+ * Establishes who the caller is, when they bothered to say - and does not
+ * mind when they didn't.
+ *
+ * For a public-discovery endpoint that also serves a richer, owner-only view
+ * (see `getEventHandler`), the same route has to work both signed-out and
+ * signed-in. `requireAuth` cannot be reused as-is: it makes a token
+ * mandatory, so an anonymous browsing request would be turned away before it
+ * ever reached a handler that was happy to serve it a public view.
+ *
+ * Every failure mode - no header, malformed token, expired token, a token
+ * naming a user who no longer exists - is treated identically: the request
+ * proceeds as anonymous. That is deliberate and different from `requireAuth`,
+ * where the same failures are a 401. There is nothing to protect by
+ * distinguishing them here: this middleware never blocks a request, so a
+ * client learns nothing by presenting a bad token that it could not already
+ * infer by presenting none.
+ */
+export async function optionalAuth(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): Promise<void> {
+  const token = readBearerToken(req);
+  if (token === null) {
+    next();
+    return;
+  }
+
+  try {
+    const claims = await verifyAccessToken(token);
+    if (claims === null) {
+      next();
+      return;
+    }
+
+    const user = await findUserById(pool, claims.id);
+    if (user !== null) {
+      req.user = { id: user.id, role: user.role };
+    }
+  } catch {
+    // Same as an absent token: proceed anonymous rather than fail a public
+    // route over a credential it did not require.
+  }
+
+  next();
+}
+
+/**
  * Narrows `req.user` from optional to present for handlers that run behind
  * `requireAuth`.
  *
