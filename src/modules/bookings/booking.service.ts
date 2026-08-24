@@ -3,6 +3,8 @@ import type { PoolClient } from 'pg';
 import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
+import { enqueueTicketEmail } from '../notifications/ticket-email.repository.js';
+import { ensureTicketsForBooking } from '../tickets/ticket.service.js';
 import { hasUsedTickets } from '../tickets/ticket.repository.js';
 import { enqueueWaitlistAllocationForSeats } from '../waitlist/waitlist-outbox.repository.js';
 import {
@@ -74,7 +76,18 @@ function holdNotFound(): NotFoundError {
  *
  * The full global order, including this path, is:
  *
- *     idempotency_keys  ->  show_seats (by id)  ->  reservation_holds
+ *     idempotency_keys  ->  show_seats (by id)  ->  reservation_holds  ->  tickets
+ *
+ * `tickets` sits last because it is only ever *inserted* here, never locked -
+ * `ensureTicketsForBooking` runs after the hold conversion above, and the
+ * rows it creates cannot have existed a moment earlier, so there is nothing
+ * for another transaction to contend with. TICKET CREATION AND EMAIL ARE PART
+ * OF THIS TRANSACTION, not a follow-up step: a booking that committed without
+ * its tickets would be sellable but unusable, and the outbox row requesting
+ * the confirmation email is written here too, alongside the tickets, so an
+ * email is requested if and only if the booking - and its tickets - actually
+ * exist. See ticket.service.ts::ensureTicketsForBooking and
+ * ticket-email.repository.ts::enqueueTicketEmail.
  */
 export async function confirmHoldInTransaction(
   client: PoolClient,
@@ -185,6 +198,27 @@ export async function confirmHoldInTransaction(
     throw new Error('Hold was no longer active when converting');
   }
 
+  // ENSURE THE BOOKING HAS ITS TICKETS, IN THE SAME TRANSACTION.
+  //
+  // A booking that commits without its tickets would be a booking a customer
+  // paid for (conceptually) and cannot yet enter anything with - so ticket
+  // creation happens here, before this transaction commits, not as a
+  // follow-up step that could be skipped or run twice. `ensureTicketsForBooking`
+  // is the same function the manual issuance endpoint calls; here it always
+  // finds no existing tickets, since this booking did not exist a moment ago.
+  //
+  // Enqueuing the email is the one line that differs from a bare issuance:
+  // this is the one call site where "tickets were just created" also means
+  // "an email should go out" - see ticket-email.repository.ts. The row is
+  // written here, in this transaction, and drained by the notifications
+  // worker afterwards - never a direct call to an email provider, which would
+  // hold these seat and hold locks open for a network round trip to a
+  // service this transaction does not control.
+  const { tickets, created: ticketsCreated } = await ensureTicketsForBooking(client, booking.id, requestId);
+  if (ticketsCreated) {
+    await enqueueTicketEmail(client, booking.id);
+  }
+
   logger.info('Confirmed booking', {
     requestId,
     bookingId: booking.id,
@@ -192,6 +226,7 @@ export async function confirmHoldInTransaction(
     holdId: input.holdId,
     eventId: input.eventId,
     seatCount: showSeatIds.length,
+    ticketCount: tickets.length,
   });
 
   return {

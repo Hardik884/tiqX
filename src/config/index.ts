@@ -165,9 +165,45 @@ const envSchema = z.object({
   // RECONCILE_INTERVAL_MS above.
   WAITLIST_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(30_000),
   WAITLIST_RECONCILE_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(100),
+
+  // ---------------------------------------------------------------------------
+  // Ticket email (notifications outbox + worker)
+  // ---------------------------------------------------------------------------
+  // 'mock' logs and records the message instead of calling out - the default,
+  // so a developer or test run never needs a real API key. 'resend' is the one
+  // real provider this codebase knows how to talk to; nothing else is wired up
+  // yet, and that is deliberate - see EmailProvider.
+  EMAIL_PROVIDER: z.enum(['mock', 'resend']).default('mock'),
+  // Both optional at the schema level - not needed for 'mock' - and required
+  // together below, only when EMAIL_PROVIDER is 'resend'.
+  RESEND_API_KEY: z.string().min(1).optional(),
+  EMAIL_FROM: z.email().optional(),
+
+  // Same shape and the same retry formula as the hold-expiration outbox
+  // (OUTBOX_RETRY_BASE_MS/MAX_MS above): claim, attempt, back off. Its own
+  // tunables because ticket email and Redis publication fail for different
+  // reasons at a different volume, not because the mechanism differs.
+  NOTIFICATIONS_OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(2_000),
+  NOTIFICATIONS_OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(50),
+  NOTIFICATIONS_OUTBOX_RETRY_BASE_MS: z.coerce.number().int().min(100).default(2_000),
+  NOTIFICATIONS_OUTBOX_RETRY_MAX_MS: z.coerce.number().int().min(1_000).default(300_000),
 });
 
-const parsed = envSchema.safeParse(process.env);
+/**
+ * `RESEND_API_KEY`/`EMAIL_FROM` are only meaningful, and only validated, when
+ * email delivery is actually enabled - the same "required only when the
+ * feature is on" shape as `JWT_SECRET` being unconditionally required while
+ * these two are conditional on a provider choice.
+ */
+const configuredSchema = envSchema.refine(
+  (value) => value.EMAIL_PROVIDER !== 'resend' || (value.RESEND_API_KEY && value.EMAIL_FROM),
+  {
+    message: 'RESEND_API_KEY and EMAIL_FROM are required when EMAIL_PROVIDER=resend',
+    path: ['EMAIL_PROVIDER'],
+  },
+);
+
+const parsed = configuredSchema.safeParse(process.env);
 
 if (!parsed.success) {
   const issues = parsed.error.issues
@@ -255,6 +291,17 @@ export const config = {
     jwtAudience: env.JWT_AUDIENCE,
     accessTokenTtlSeconds: env.ACCESS_TOKEN_TTL_SECONDS,
     refreshTokenTtlSeconds: env.REFRESH_TOKEN_TTL_SECONDS,
+  },
+  email: {
+    provider: env.EMAIL_PROVIDER,
+    resendApiKey: env.RESEND_API_KEY,
+    from: env.EMAIL_FROM,
+  },
+  notifications: {
+    outboxPollIntervalMs: env.NOTIFICATIONS_OUTBOX_POLL_INTERVAL_MS,
+    outboxBatchSize: env.NOTIFICATIONS_OUTBOX_BATCH_SIZE,
+    outboxRetryBaseMs: env.NOTIFICATIONS_OUTBOX_RETRY_BASE_MS,
+    outboxRetryMaxMs: env.NOTIFICATIONS_OUTBOX_RETRY_MAX_MS,
   },
 } as const;
 

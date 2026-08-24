@@ -10,7 +10,7 @@ import { cancelBookingInTransaction } from '../src/modules/bookings/booking.serv
 import { withTransaction } from '../src/db/pool.js';
 import { accessTokenForUser } from './helpers/auth.js';
 import { closeTestRedis, connectTestRedis, flushTestNamespace } from './helpers/redis.js';
-import { cleanupSeedData, seedConfirmedBooking, seedCustomer } from './helpers/seed.js';
+import { cleanupSeedData, deleteAutoIssuedTickets, seedConfirmedBooking, seedCustomer } from './helpers/seed.js';
 
 let server: Server;
 let baseUrl: string;
@@ -77,8 +77,16 @@ async function issue(
 }
 
 describe('issuing tickets', () => {
+  // Confirmation itself now issues a booking's tickets the moment it commits
+  // (see ensureTicketsForBooking) - `seedConfirmedBooking` bookings always
+  // arrive with tickets already present. Most tests below call
+  // `deleteAutoIssuedTickets` first to put the booking back into the state
+  // the *manual* endpoint exists to backfill: a confirmed booking with none
+  // yet. See the helper's own doc comment.
+
   it('issues one ticket for a single-seat booking', async () => {
     const booking = await seedConfirmedBooking(1);
+    await deleteAutoIssuedTickets(booking.bookingId);
 
     const reply = await issue(booking.bookingId, { userId: booking.userId });
 
@@ -100,6 +108,7 @@ describe('issuing tickets', () => {
 
   it('issues one ticket per seat for a multi-seat booking', async () => {
     const booking = await seedConfirmedBooking(4);
+    await deleteAutoIssuedTickets(booking.bookingId);
 
     const reply = await issue(booking.bookingId, { userId: booking.userId });
 
@@ -139,13 +148,13 @@ describe('issuing tickets', () => {
   });
 
   it('rejects repeat issuance for a booking that already has tickets', async () => {
+    // Confirmation already issued this booking's ticket - no setup needed to
+    // reach the "already issued" state, unlike the other tests in this file.
     const booking = await seedConfirmedBooking(1);
-    const first = await issue(booking.bookingId, { userId: booking.userId });
-    assert.equal(first.status, 201);
 
-    const second = await issue(booking.bookingId, { userId: booking.userId });
-    assert.equal(second.status, 409);
-    assert.equal(second.json.error?.details?.reason, 'TICKETS_ALREADY_ISSUED');
+    const reply = await issue(booking.bookingId, { userId: booking.userId });
+    assert.equal(reply.status, 409);
+    assert.equal(reply.json.error?.details?.reason, 'TICKETS_ALREADY_ISSUED');
 
     const rows = await query<{ count: string }>(
       'SELECT count(*)::text AS count FROM tickets WHERE booking_id = $1',
@@ -165,11 +174,13 @@ describe('issuing tickets', () => {
     assert.equal(reply.status, 409);
     assert.equal(reply.json.error?.details?.reason, 'BOOKING_CANCELLED');
 
+    // Confirmation already issued 1 ticket before cancellation; the point
+    // here is that the cancelled booking's issuance attempt added no more.
     const rows = await query<{ count: string }>(
       'SELECT count(*)::text AS count FROM tickets WHERE booking_id = $1',
       [booking.bookingId],
     );
-    assert.equal(rows.rows[0]!.count, '0', 'a cancelled booking never receives tickets');
+    assert.equal(rows.rows[0]!.count, '1', 'a cancelled booking never receives additional tickets');
   });
 
   it('answers a missing booking with 404', async () => {
@@ -192,6 +203,7 @@ describe('issuing tickets', () => {
 
   it('lets the organiser of the event issue tickets on the booking owner\'s behalf', async () => {
     const booking = await seedConfirmedBooking(1);
+    await deleteAutoIssuedTickets(booking.bookingId);
 
     const reply = await issue(booking.bookingId, { userId: booking.organiserId });
 
@@ -201,6 +213,7 @@ describe('issuing tickets', () => {
 
   it('lets an admin issue tickets for any booking', async () => {
     const booking = await seedConfirmedBooking(1);
+    await deleteAutoIssuedTickets(booking.bookingId);
     const admin = await seedCustomer(); // role fixed up below
     await query("UPDATE users SET role = 'admin' WHERE id = $1", [admin]);
 
@@ -224,6 +237,7 @@ describe('issuing tickets', () => {
 
   it('replays the same tickets for a retried request with the same key', async () => {
     const booking = await seedConfirmedBooking(2);
+    await deleteAutoIssuedTickets(booking.bookingId);
     const key = randomUUID();
 
     const first = await issue(booking.bookingId, { userId: booking.userId, key });
@@ -246,6 +260,7 @@ describe('issuing tickets', () => {
 
   it('rejects the same key reused for a different booking', async () => {
     const bookingA = await seedConfirmedBooking(1);
+    await deleteAutoIssuedTickets(bookingA.bookingId);
     const bookingB = await seedConfirmedBooking(1);
     const key = randomUUID();
 

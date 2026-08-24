@@ -6,11 +6,12 @@ import {
   reconcileExpiryKeys,
   sweepExpiredHolds,
 } from '../modules/expiration/expiration.service.js';
+import { countPendingTicketEmails, sendPendingTicketEmails } from '../modules/notifications/ticket-email.service.js';
 import { closeRedis, connectRedis, verifyRedisConnection } from '../redis/client.js';
 import { logger } from '../utils/logger.js';
 
 /**
- * The hold expiration worker.
+ * The background worker: hold expiration and ticket email delivery.
  *
  * A separate entrypoint from the API, sharing its configuration, pool and Redis
  * client but starting no HTTP server. Running it inside the API process would
@@ -18,15 +19,25 @@ import { logger } from '../utils/logger.js';
  * the sweep; here they scale independently, and the worker can be run as many
  * times as needed because every loop is safe under concurrency.
  *
- * Three loops, each with its own cadence:
+ * Four loops, each with its own cadence:
  *
  *   publish      outbox rows -> Redis expiration keys           (fast)
  *   sweep        PostgreSQL holds past expiry -> expired        (fast, authoritative)
  *   reconcile    active holds missing a Redis key -> restored   (slow, self-healing)
+ *   ticket email outbox rows -> EmailProvider                   (fast)
  *
- * They are separate because they fail independently. Redis being down stops
- * publishing and reconciliation but must not stop the sweep, which needs only
- * PostgreSQL - so a Redis outage delays the *signal*, never the expiry itself.
+ * Ticket email delivery lives in this same process and file rather than a
+ * second worker script, on the same "reuse the existing worker" reasoning
+ * that led to a new outbox *table* instead of a new outbox *table shape
+ * shared awkwardly with holds* - one running process to operate, one
+ * polling harness (`runLoop`) both kinds of background work already share.
+ *
+ * All four loops fail independently. Redis being down stops publishing and
+ * reconciliation but must not stop the sweep, which needs only PostgreSQL -
+ * so a Redis outage delays the *signal*, never the expiry itself. Likewise, an
+ * email provider outage stops ticket email delivery but must not stop, or be
+ * affected by, anything else here: a failed send leaves its outbox row
+ * unprocessed for the next pass and touches no booking, ticket, hold or seat.
  */
 
 /** Counters for the periodic summary. No metrics framework is introduced. */
@@ -36,6 +47,8 @@ interface WorkerStats {
   expired: number;
   noop: number;
   reconciled: number;
+  emailsSent: number;
+  emailFailures: number;
   loopErrors: number;
 }
 
@@ -45,6 +58,8 @@ const stats: WorkerStats = {
   expired: 0,
   noop: 0,
   reconciled: 0,
+  emailsSent: 0,
+  emailFailures: 0,
   loopErrors: 0,
 };
 
@@ -107,6 +122,12 @@ async function reconcileLoop(): Promise<void> {
   stats.reconciled += result.restored;
 }
 
+async function ticketEmailLoop(): Promise<void> {
+  const result = await sendPendingTicketEmails();
+  stats.emailsSent += result.sent;
+  stats.emailFailures += result.failed;
+}
+
 /**
  * Periodic summary.
  *
@@ -117,6 +138,7 @@ async function reconcileLoop(): Promise<void> {
  */
 async function summaryLoop(): Promise<void> {
   const pending = await withTransaction((client) => countPendingOutbox(client));
+  const pendingEmails = await withTransaction((client) => countPendingTicketEmails(client));
 
   logger.info('Hold expiration worker summary', {
     pendingOutbox: pending,
@@ -125,6 +147,9 @@ async function summaryLoop(): Promise<void> {
     expired: stats.expired,
     noop: stats.noop,
     reconciled: stats.reconciled,
+    pendingTicketEmails: pendingEmails,
+    emailsSent: stats.emailsSent,
+    emailFailures: stats.emailFailures,
     loopErrors: stats.loopErrors,
   });
 }
@@ -194,6 +219,8 @@ async function start(): Promise<void> {
     outboxPollIntervalMs: config.expiration.outboxPollIntervalMs,
     sweepIntervalMs: config.expiration.sweepIntervalMs,
     reconcileIntervalMs: config.expiration.reconcileIntervalMs,
+    ticketEmailPollIntervalMs: config.notifications.outboxPollIntervalMs,
+    emailProvider: config.email.provider,
   });
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
@@ -203,6 +230,7 @@ async function start(): Promise<void> {
     runLoop('publish', config.expiration.outboxPollIntervalMs, publishLoop),
     runLoop('sweep', config.expiration.sweepIntervalMs, sweepLoop),
     runLoop('reconcile', config.expiration.reconcileIntervalMs, reconcileLoop),
+    runLoop('ticket-email', config.notifications.outboxPollIntervalMs, ticketEmailLoop),
     runLoop('summary', Math.max(config.expiration.reconcileIntervalMs, 30_000), summaryLoop),
   ]);
 }

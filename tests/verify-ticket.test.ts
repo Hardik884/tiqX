@@ -61,17 +61,17 @@ async function verify(ticketId: string, userId?: string | null): Promise<Reply> 
   return { status: response.status, json: raw ? (JSON.parse(raw) as Body) : {} };
 }
 
-async function issueOne(bookingId: string, userId: string): Promise<{ ticketId: string }> {
-  const response = await fetch(`${baseUrl}/api/v1/bookings/${bookingId}/tickets/issue`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${await accessTokenForUser(userId)}`,
-      'idempotency-key': randomUUID(),
-    },
-  });
-  const body = (await response.json()) as { tickets: { ticketId: string }[] };
-  return { ticketId: body.tickets[0]!.ticketId };
+/**
+ * The ticket confirmation already issued for this booking - see
+ * `ensureTicketsForBooking` in ticket.service.ts. Reads it back directly
+ * rather than calling the manual issuance endpoint, which now finds a ticket
+ * already present and answers 409, not the fresh ticket these tests need.
+ */
+async function issueOne(bookingId: string, _userId: string): Promise<{ ticketId: string }> {
+  const result = await query<{ id: string }>('SELECT id FROM tickets WHERE booking_id = $1 LIMIT 1', [
+    bookingId,
+  ]);
+  return { ticketId: result.rows[0]!.id };
 }
 
 describe('verifying a ticket', () => {

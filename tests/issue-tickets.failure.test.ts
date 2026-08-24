@@ -8,7 +8,7 @@ import { createApp } from '../src/app.js';
 import { closePool, query } from '../src/db/pool.js';
 import { accessTokenForUser } from './helpers/auth.js';
 import { closeTestRedis, connectTestRedis, flushTestNamespace } from './helpers/redis.js';
-import { cleanupSeedData, seedConfirmedBooking } from './helpers/seed.js';
+import { cleanupSeedData, deleteAutoIssuedTickets, seedConfirmedBooking } from './helpers/seed.js';
 
 let server: Server;
 let baseUrl: string;
@@ -55,6 +55,11 @@ async function issue(bookingId: string, userId: string, key: string) {
 describe('ticket issuance failure injection', () => {
   it('leaves no partial ticket set when insertion fails mid-transaction', async () => {
     const booking = await seedConfirmedBooking(3);
+    // Confirmation already issued this booking's tickets - removed so the
+    // manual endpoint actually attempts a fresh insert for the fault below to
+    // interrupt, matching the pre-existing-booking backfill case this
+    // endpoint exists for.
+    await deleteAutoIssuedTickets(booking.bookingId);
     const key = randomUUID();
 
     // Fault injection, after the idempotency key has already been claimed
@@ -104,6 +109,10 @@ describe('ticket issuance failure injection', () => {
     const { withTransaction } = await import('../src/db/pool.js');
 
     const booking = await seedConfirmedBooking(2);
+    // Confirmation already issued tickets for these exact booking_seat_ids;
+    // removed so the insert below can collide on `ticket_reference` alone,
+    // in isolation, rather than also hitting `tickets_booking_seat_id_key`.
+    await deleteAutoIssuedTickets(booking.bookingId);
     const seats = await query<{ id: string }>('SELECT id FROM booking_seats WHERE booking_id = $1 ORDER BY id', [
       booking.bookingId,
     ]);
@@ -114,6 +123,7 @@ describe('ticket issuance failure injection', () => {
     // ticket_reference, which is unique across the whole table regardless of
     // which seat it is attached to.
     const other = await seedConfirmedBooking(1);
+    await deleteAutoIssuedTickets(other.bookingId);
     const otherSeat = await query<{ id: string }>('SELECT id FROM booking_seats WHERE booking_id = $1', [
       other.bookingId,
     ]);

@@ -19,9 +19,17 @@ Conventions (see `health/` for the working example):
 creation with its derived seat inventory, and the transactional hold operation
 that temporarily reserves seats. `auth` is implemented: registration, login,
 JWT access tokens and rotating refresh tokens, plus the middleware that other
-modules mount. `idempotency` is a supporting module rather than a feature: it
-wraps a write so retrying it is safe. Folders that hold only a `.gitkeep` are placeholders
-and intentionally contain no code yet.
+modules mount. `bookings` and `tickets` are implemented: confirming a hold,
+cancelling a booking, and the ticket a confirmed booking earns, including
+atomic verification. `waitlist` is implemented: queueing for a sold-out
+event/category and allocating a time-limited offer when a seat frees up, on
+its own outbox/worker. `notifications` is partially implemented:
+ticket-delivery email only (an `EmailProvider` abstraction - mock and Resend -
+driven by the same outbox/worker pattern `expiration` and `waitlist` use), not
+the in-app notifications this table originally described. `idempotency` is a
+supporting module rather than a feature: it wraps a write so retrying it is
+safe. Folders that hold only a `.gitkeep` are placeholders and intentionally
+contain no code yet.
 
 | Module          | Planned responsibility                          |
 | --------------- | ----------------------------------------------- |
@@ -32,8 +40,9 @@ and intentionally contain no code yet.
 | `seats`         | per-event seat inventory (`show_seats`)         |
 | `reservations`  | temporary seat holds (`reservation_holds`)      |
 | `bookings`      | confirming a hold into a durable booking, and cancelling one |
+| `tickets`       | one per confirmed booking seat, and its verification |
 | `waitlist`      | queueing for sold-out event/categories, and time-limited offers when a seat frees up |
-| `notifications` | email and in-app notifications                  |
+| `notifications` | ticket-delivery email (outbox-driven); in-app notifications still unplanned |
 | `analytics`     | reporting for organisers and admins             |
 | `idempotency`   | stored responses for safely retryable writes    |
 | `rate-limit`    | Redis-backed distributed request limiting       |

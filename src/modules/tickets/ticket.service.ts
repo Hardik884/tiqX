@@ -5,10 +5,10 @@ import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
 import {
-  countTicketsForBooking,
   findLiveBookingSeatIds,
   findTicketBookingId,
   findTicketById,
+  findTicketsForBooking,
   findTicketVerificationContext,
   generateTicketReference,
   insertTicketsForSeats,
@@ -89,8 +89,74 @@ async function insertTicketsWithRetry(
   throw new Error(`Could not allocate unique ticket references in ${REFERENCE_ATTEMPTS} attempts`);
 }
 
+export interface EnsureTicketsResult {
+  tickets: TicketRecord[];
+  /** False when tickets already existed and nothing new was created. */
+  created: boolean;
+}
+
 /**
- * Issues one ticket per live seat of a confirmed booking.
+ * The core ticket-issuance mechanics: idempotent, and ignorant of who is
+ * asking.
+ *
+ * Shared by two callers with different obligations - automatic issuance at
+ * booking confirmation, and the manual issuance endpoint - which is exactly
+ * why authorisation, ownership and booking-status checks are *not* done here.
+ * `confirmHoldInTransaction` calls this the instant a booking is created, when
+ * there is no separate "caller" to authorise; `issueTicketsInTransaction`
+ * does its own ownership/status checks first, under the same booking lock,
+ * and only reaches this once they pass.
+ *
+ * Idempotent by construction, not by a flag this function invents: if
+ * tickets already exist for the booking, they are returned unchanged and
+ * `created` is false. The `tickets_booking_seat_id_key` unique constraint is
+ * the actual backstop - this check is what makes the common case cheap
+ * (skip straight to "already have them") rather than what makes it correct.
+ */
+export async function ensureTicketsForBooking(
+  client: PoolClient,
+  bookingId: string,
+  requestId: string | undefined,
+): Promise<EnsureTicketsResult> {
+  const existing = await findTicketsForBooking(client, bookingId);
+  if (existing.length > 0) {
+    return { tickets: existing, created: false };
+  }
+
+  const bookingSeatIds = await findLiveBookingSeatIds(client, bookingId);
+  if (bookingSeatIds.length === 0) {
+    // Unreachable while confirmation always creates at least one seat and
+    // cancellation never deletes a booking_seats row - kept as a refusal
+    // rather than an assumption, the same way confirmation and cancellation
+    // both refuse on a seat/state disagreement instead of guessing.
+    logger.error('Confirmed booking has no seats, refusing to issue tickets', {
+      requestId,
+      bookingId,
+    });
+    throw new ConflictError('This booking has no seats to issue tickets for', {
+      reason: 'BOOKING_HAS_NO_SEATS',
+    });
+  }
+
+  const tickets = await insertTicketsWithRetry(client, bookingId, bookingSeatIds, requestId);
+  if (tickets.length !== bookingSeatIds.length) {
+    throw new Error(`Expected ${bookingSeatIds.length} tickets, inserted ${tickets.length}`);
+  }
+
+  return { tickets, created: true };
+}
+
+/**
+ * Issues one ticket per live seat of a confirmed booking, on request.
+ *
+ * In the ordinary case there is nothing left to do: booking confirmation
+ * already called `ensureTicketsForBooking` the moment the booking was
+ * created (see booking.service.ts), so this almost always finds tickets
+ * already present and answers `TICKETS_ALREADY_ISSUED`. It stays as a
+ * separate, callable endpoint rather than being removed, both because a
+ * booking confirmed before this behaviour existed would otherwise have no
+ * way to backfill tickets, and because `ensureTicketsForBooking`'s own
+ * idempotence means calling it again here is always safe.
  *
  * THE AUTHORISATION MODEL. Three principals may issue tickets for a booking:
  * the customer who owns it, any admin, or the organiser of the event it
@@ -104,10 +170,7 @@ async function insertTicketsWithRetry(
  *       lock the booking (and read its event's organiser) FOR UPDATE
  *       verify it exists, verify ownership/authorisation
  *       verify status = 'confirmed'
- *       verify no tickets already exist for it
- *       load its live booking_seats
- *       verify it has seats
- *       insert one ticket per seat, in one statement
+ *       ensureTicketsForBooking - already-issued is a conflict here
  *     COMMIT
  *
  * LOCK ORDER: `bookings`, then `tickets` (via the insert). This is the same
@@ -180,7 +243,9 @@ export async function issueTicketsInTransaction(
     });
   }
 
-  if ((await countTicketsForBooking(client, input.bookingId)) > 0) {
+  const { tickets, created } = await ensureTicketsForBooking(client, input.bookingId, requestId);
+
+  if (!created) {
     logger.warn('Rejected ticket issuance', {
       requestId,
       bookingId: input.bookingId,
@@ -189,26 +254,6 @@ export async function issueTicketsInTransaction(
     throw new ConflictError('Tickets have already been issued for this booking', {
       reason: 'TICKETS_ALREADY_ISSUED',
     });
-  }
-
-  const bookingSeatIds = await findLiveBookingSeatIds(client, input.bookingId);
-  if (bookingSeatIds.length === 0) {
-    // Unreachable while confirmation always creates at least one seat and
-    // cancellation never deletes a booking_seats row - kept as a refusal
-    // rather than an assumption, the same way confirmation and cancellation
-    // both refuse on a seat/state disagreement instead of guessing.
-    logger.error('Confirmed booking has no seats, refusing to issue tickets', {
-      requestId,
-      bookingId: input.bookingId,
-    });
-    throw new ConflictError('This booking has no seats to issue tickets for', {
-      reason: 'BOOKING_HAS_NO_SEATS',
-    });
-  }
-
-  const tickets = await insertTicketsWithRetry(client, input.bookingId, bookingSeatIds, requestId);
-  if (tickets.length !== bookingSeatIds.length) {
-    throw new Error(`Expected ${bookingSeatIds.length} tickets, inserted ${tickets.length}`);
   }
 
   logger.info('Issued tickets', {

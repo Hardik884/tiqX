@@ -267,3 +267,20 @@ export async function seedConfirmedBooking(
 
   return { eventId: event.id, organiserId, userId, seatIds, bookingId: result.booking.id };
 }
+
+/**
+ * Removes the tickets confirmation just auto-issued for a booking, without
+ * touching anything else - the booking, its seats and the ticket-email
+ * outbox row it already requested are all left exactly as they are.
+ *
+ * `seedConfirmedBooking` always produces a booking that already has its
+ * tickets (confirmation issues them itself - see
+ * `ensureTicketsForBooking`), so a test of the *manual* issuance endpoint's
+ * own first-issuance behaviour needs to remove them first. That is a real
+ * scenario, not a test-only fiction: a booking confirmed before this feature
+ * existed is in exactly this state, and the manual endpoint exists to
+ * backfill it.
+ */
+export async function deleteAutoIssuedTickets(bookingId: string): Promise<void> {
+  await query('DELETE FROM tickets WHERE booking_id = $1', [bookingId]);
+}
