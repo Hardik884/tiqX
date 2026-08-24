@@ -1,5 +1,7 @@
 {
   "rewrites": [
+    { "source": "/api/(.*)", "destination": "https://tiqx.onrender.com/api/$1" },
+    { "source": "/ws", "destination": "https://tiqx.onrender.com/ws" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
