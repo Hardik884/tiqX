@@ -1,9 +1,14 @@
+import type { PoolClient } from 'pg';
+
 import { config } from '../../config/index.js';
 import { withTransaction } from '../../db/pool.js';
 import { getRedis } from '../../redis/client.js';
 import { holdExpiryKey } from '../../redis/keys.js';
 import { logger } from '../../utils/logger.js';
 import { releaseSeatsWithoutLiveHold } from '../reservations/reservation.repository.js';
+import { enqueueOfferNotification, enqueueWaitlistAllocationForSeats } from '../waitlist/waitlist-outbox.repository.js';
+import { markEntryExpired, markOfferExpiredByHoldId } from '../waitlist/waitlist.repository.js';
+import type { WaitlistOfferNotificationPayload } from '../waitlist/waitlist.types.js';
 import {
   claimPendingOutboxRows,
   findActiveHoldsExpiringWithin,
@@ -113,14 +118,15 @@ export async function publishPendingExpirations(): Promise<PublishResult> {
 }
 
 /**
- * Expires one hold and releases its seats, or does nothing.
+ * The transactional core of {@link expireHold}, usable by a caller that
+ * already owns the transaction.
  *
  * LOCK ORDER: seats first, in ascending id order, then the hold. This is the
  * same order the reservation path takes, and matching it is what prevents a
  * deadlock - two transactions that take the same two locks in opposite orders
- * will eventually cycle, and PostgreSQL will kill one of them. Since the worker
- * naturally starts from a hold and the reservation naturally starts from seats,
- * getting this backwards would be the easy mistake.
+ * will eventually cycle, and PostgreSQL will kill one of them. Since the
+ * caller naturally starts from a hold and the reservation naturally starts
+ * from seats, getting this backwards would be the easy mistake.
  *
  * Everything after the locks happens in one transaction, so no observer ever
  * sees the half-state where the hold reads expired but its seats still read
@@ -131,42 +137,94 @@ export async function publishPendingExpirations(): Promise<PublishResult> {
  * and two workers may pick the same candidate. A hold that is missing,
  * cancelled, converted, or already expired is a no-op, not an error: whoever
  * took the lock first performed the transition, and the loser simply agrees.
+ *
+ * Nothing here is waitlist-specific except the last two lines, and they are
+ * deliberately generic rather than conditional on "was this hold backing an
+ * offer": every seat this function frees is a fresh opportunity for whoever
+ * is queued for its category, whether the hold that lapsed was an ordinary
+ * customer's or a waitlist offer's. `enqueueWaitlistAllocationForSeats` is a
+ * no-op for an event with no waitlist activity, so this costs nothing extra
+ * on the overwhelmingly common path where nobody is waiting.
+ *
+ * `markOfferExpiredByHoldId`/`markEntryExpired` are the one part that IS
+ * conditional - bookkeeping for the waitlist's own state, not for seat
+ * release, which has already happened by the time they run. The entry moves
+ * to `expired` alongside its offer, deliberately not back to `waiting`: see
+ * the waitlist migration's top comment for why a lapsed offer does not
+ * re-queue its holder. See waitlist_offers in the waitlist migration
+ * for why an offer's expiry rides this sweep instead of a dedicated one: both
+ * `POST /waitlist/offers/:offerId/accept` and this function reach
+ * `reservation_holds` through the identical lock order - seats, then the hold
+ * - and only touch `waitlist_offers` afterwards, which is what makes
+ * acceptance and expiry serialise on the hold instead of being able to
+ * deadlock against each other. See waitlist.service.ts::acceptWaitlistOffer.
  */
-export async function expireHold(holdId: string): Promise<'expired' | 'noop'> {
-  return withTransaction(async (client) => {
-    const seatIds = await findHoldSeatIds(client, holdId);
+export async function expireHoldInTransaction(
+  client: PoolClient,
+  holdId: string,
+): Promise<'expired' | 'noop'> {
+  const seatIds = await findHoldSeatIds(client, holdId);
 
-    // Seats first, ascending - matching the reservation path exactly.
-    await lockSeats(client, seatIds);
+  // Seats first, ascending - matching the reservation path exactly.
+  await lockSeats(client, seatIds);
 
-    const hold = await lockHold(client, holdId);
+  const hold = await lockHold(client, holdId);
 
-    if (hold === null || hold.status !== 'active' || !hold.due) {
-      // Gone, already resolved, or not actually due. The last case matters:
-      // a Redis key can lapse early or a signal arrive stale, and PostgreSQL
-      // gets the final say on whether the hold has really expired.
-      return 'noop';
-    }
+  if (hold === null || hold.status !== 'active' || !hold.due) {
+    // Gone, already resolved, or not actually due. The last case matters:
+    // a Redis key can lapse early or a signal arrive stale, and PostgreSQL
+    // gets the final say on whether the hold has really expired.
+    return 'noop';
+  }
 
-    const changed = await markHoldExpired(client, holdId);
-    if (!changed) {
-      return 'noop';
-    }
+  const changed = await markHoldExpired(client, holdId);
+  if (!changed) {
+    return 'noop';
+  }
 
-    // Reuses the reservation path's own release rule, which only frees a seat
-    // that no *live* active hold still covers. Our hold is no longer live, so
-    // its seats are freed; a seat somehow claimed by another live hold is left
-    // alone rather than being handed to nobody.
-    const released = await releaseSeatsWithoutLiveHold(client, seatIds);
+  // Reuses the reservation path's own release rule, which only frees a seat
+  // that no *live* active hold still covers. Our hold is no longer live, so
+  // its seats are freed; a seat somehow claimed by another live hold is left
+  // alone rather than being handed to nobody.
+  const released = await releaseSeatsWithoutLiveHold(client, seatIds);
 
-    logger.info('Expired hold and released seats', {
-      holdId,
-      seats: seatIds.length,
-      released: released.length,
-    });
-
-    return 'expired';
+  logger.info('Expired hold and released seats', {
+    holdId,
+    seats: seatIds.length,
+    released: released.length,
   });
+
+  await enqueueWaitlistAllocationForSeats(client, released);
+
+  const expiredOffer = await markOfferExpiredByHoldId(client, holdId);
+  if (expiredOffer !== null) {
+    if (!(await markEntryExpired(client, expiredOffer.waitlistEntryId))) {
+      throw new Error('Waitlist entry was no longer offered when its offer expired');
+    }
+
+    const payload: WaitlistOfferNotificationPayload = {
+      v: 1,
+      offerId: expiredOffer.id,
+      waitlistEntryId: expiredOffer.waitlistEntryId,
+      userId: hold.userId,
+      eventId: hold.eventId,
+      showSeatId: expiredOffer.showSeatId,
+      expiresAt: expiredOffer.expiresAt.toISOString(),
+    };
+    await enqueueOfferNotification(client, expiredOffer.id, 'WAITLIST_OFFER_EXPIRED', payload);
+
+    logger.info('Waitlist offer expired', {
+      offerId: expiredOffer.id,
+      waitlistEntryId: expiredOffer.waitlistEntryId,
+      holdId,
+    });
+  }
+
+  return 'expired';
+}
+
+export async function expireHold(holdId: string): Promise<'expired' | 'noop'> {
+  return withTransaction((client) => expireHoldInTransaction(client, holdId));
 }
 
 /**

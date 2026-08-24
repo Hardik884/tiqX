@@ -42,6 +42,19 @@ function toEventRecord(row: EventRow): EventRecord {
   };
 }
 
+/**
+ * The event's status alone, unlocked - for a caller that needs to answer
+ * "does this exist and is it public-facing?" without taking part in
+ * `event.service.ts`'s ownership lock order. Used by waitlist.service.ts's
+ * join check; nothing here mutates the row, so no lock is warranted.
+ */
+export async function findEventStatus(db: Queryable, eventId: string): Promise<EventStatus | null> {
+  const result = await db.query<{ status: EventStatus }>('SELECT status FROM events WHERE id = $1', [
+    eventId,
+  ]);
+  return result.rows[0]?.status ?? null;
+}
+
 export async function insertEvent(db: Queryable, input: CreateEventInput): Promise<EventRecord> {
   const result = await db.query<EventRow>(
     `INSERT INTO events (organiser_id, venue_id, title, description, category, event_type, starts_at, ends_at, status, currency)

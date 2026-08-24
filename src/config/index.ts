@@ -144,6 +144,27 @@ const envSchema = z.object({
   RECONCILE_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(200),
   // How far ahead to look for active holds needing a key.
   RECONCILE_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
+
+  // ---------------------------------------------------------------------------
+  // Waitlist allocation worker
+  // ---------------------------------------------------------------------------
+  // How long a waitlist offer holds its seat before it lapses to the next
+  // candidate. Bounded like the token TTLs above: long enough for a customer
+  // to notice and act on a real notification, short enough that a seat is not
+  // taken out of circulation for the whole line behind an unresponsive one.
+  WAITLIST_OFFER_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(300),
+
+  // Claiming allocation-opportunity signals from the outbox.
+  WAITLIST_ALLOCATION_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(1_000),
+  WAITLIST_ALLOCATION_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(50),
+  WAITLIST_ALLOCATION_RETRY_BASE_MS: z.coerce.number().int().min(100).default(1_000),
+  WAITLIST_ALLOCATION_RETRY_MAX_MS: z.coerce.number().int().min(1_000).default(60_000),
+
+  // Self-healing scan for event/categories with waiting candidates and
+  // available seats but no pending outbox row - the waitlist analogue of
+  // RECONCILE_INTERVAL_MS above.
+  WAITLIST_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(30_000),
+  WAITLIST_RECONCILE_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(100),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -218,6 +239,15 @@ export const config = {
     reconcileIntervalMs: env.RECONCILE_INTERVAL_MS,
     reconcileBatchSize: env.RECONCILE_BATCH_SIZE,
     reconcileWindowSeconds: env.RECONCILE_WINDOW_SECONDS,
+  },
+  waitlist: {
+    offerTtlSeconds: env.WAITLIST_OFFER_TTL_SECONDS,
+    allocationPollIntervalMs: env.WAITLIST_ALLOCATION_POLL_INTERVAL_MS,
+    allocationBatchSize: env.WAITLIST_ALLOCATION_BATCH_SIZE,
+    allocationRetryBaseMs: env.WAITLIST_ALLOCATION_RETRY_BASE_MS,
+    allocationRetryMaxMs: env.WAITLIST_ALLOCATION_RETRY_MAX_MS,
+    reconcileIntervalMs: env.WAITLIST_RECONCILE_INTERVAL_MS,
+    reconcileBatchSize: env.WAITLIST_RECONCILE_BATCH_SIZE,
   },
   auth: {
     jwtSecret: env.JWT_SECRET,

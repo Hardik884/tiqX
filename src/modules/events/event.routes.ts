@@ -5,6 +5,7 @@ import { optionalAuth, requireAuth } from '../../middleware/authenticate.js';
 import { requireRole } from '../../middleware/authorize.js';
 import { rateLimit } from '../../middleware/rate-limit.js';
 import { reservationRouter } from '../reservations/reservation.routes.js';
+import { waitlistRouter } from '../waitlist/waitlist.routes.js';
 import {
   createEventHandler,
   deleteEventHandler,
@@ -59,6 +60,11 @@ eventRouter.post('/:eventId/publish', requireAuth, requireRole('organiser', 'adm
 // Any authenticated user may hold seats - buying tickets is what a customer
 // account is for - so this needs identity but no role restriction.
 eventRouter.use('/:eventId/holds', requireAuth, reservationRouter);
+
+// Waitlist join/leave, scoped to an event the same way holds are: POST
+// /api/v1/events/:eventId/waitlist. Accepting an offer is not scoped this
+// way - see waitlist-offer.routes.ts.
+eventRouter.use('/:eventId/waitlist', requireAuth, waitlistRouter);
 
 /**
  * Mounted at /api/v1/organiser/events, deliberately not nested under

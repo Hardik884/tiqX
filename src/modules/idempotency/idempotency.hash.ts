@@ -113,3 +113,47 @@ export function hashIssueTicketsRequest(fingerprint: IssueTicketsRequestFingerpr
 
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
+
+/**
+ * The fields that identify one waitlist-join request.
+ *
+ * `seatCategory` is part of the identity, unlike `bookingId` for cancellation:
+ * a customer can validly hold two different active memberships for the same
+ * event as long as they are for different categories, so the digest has to
+ * distinguish "join premium" from "join standard" even when everything else
+ * matches.
+ */
+export interface JoinWaitlistRequestFingerprint {
+  userId: string;
+  eventId: string;
+  seatCategory: string;
+}
+
+export function hashJoinWaitlistRequest(fingerprint: JoinWaitlistRequestFingerprint): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: 'join-waitlist',
+    userId: fingerprint.userId,
+    eventId: fingerprint.eventId,
+    seatCategory: fingerprint.seatCategory,
+  });
+
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
+/** The fields that identify one waitlist offer acceptance. */
+export interface AcceptOfferRequestFingerprint {
+  userId: string;
+  offerId: string;
+}
+
+export function hashAcceptOfferRequest(fingerprint: AcceptOfferRequestFingerprint): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: 'accept-waitlist-offer',
+    userId: fingerprint.userId,
+    offerId: fingerprint.offerId,
+  });
+
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}

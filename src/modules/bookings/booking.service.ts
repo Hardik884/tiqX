@@ -4,6 +4,7 @@ import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
 import { hasUsedTickets } from '../tickets/ticket.repository.js';
+import { enqueueWaitlistAllocationForSeats } from '../waitlist/waitlist-outbox.repository.js';
 import {
   applyBookingTotal,
   generateBookingReference,
@@ -264,6 +265,12 @@ function bookingNotFound(): NotFoundError {
  * `show_seats` or `reservation_holds`, so there is no cycle between the two
  * global orders above; they only ever share the `bookings` row.
  *
+ * `enqueueWaitlistAllocationForSeats` at the end takes no lock of its own - a
+ * plain INSERT against a row nothing else here has touched - so it adds
+ * nothing to this ordering. See the waitlist migration's top comment for what
+ * reads that signal and how it fits the same global order from the other
+ * side, through `show_seats` and `reservation_holds`.
+ *
  * WHERE A REFUND WOULD GO. Not here. This function must stay a pure PostgreSQL
  * transaction: it holds row locks on inventory that other customers are queuing
  * for, and an HTTP call to a payment provider inside those locks would hold them
@@ -388,6 +395,14 @@ export async function cancelBookingInTransaction(
     // to abort rather than half-release.
     throw new Error(`Expected to release ${showSeatIds.length} seats, updated ${released}`);
   }
+
+  // A released seat is a fresh allocation opportunity for whoever is waitlisted
+  // for its category - see the waitlist migration's top comment and
+  // expireHoldInTransaction in expiration.service.ts, which enqueues the same
+  // signal for the other path that frees a seat. A no-op when nobody is
+  // waiting: the signal is cheap and the allocation pass that eventually reads
+  // it finds nothing to do.
+  await enqueueWaitlistAllocationForSeats(client, showSeatIds);
 
   logger.info('Cancelled booking', {
     requestId,

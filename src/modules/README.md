@@ -32,7 +32,7 @@ and intentionally contain no code yet.
 | `seats`         | per-event seat inventory (`show_seats`)         |
 | `reservations`  | temporary seat holds (`reservation_holds`)      |
 | `bookings`      | confirming a hold into a durable booking, and cancelling one |
-| `waitlist`      | queueing for sold-out events                    |
+| `waitlist`      | queueing for sold-out event/categories, and time-limited offers when a seat frees up |
 | `notifications` | email and in-app notifications                  |
 | `analytics`     | reporting for organisers and admins             |
 | `idempotency`   | stored responses for safely retryable writes    |

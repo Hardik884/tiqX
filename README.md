@@ -2,11 +2,11 @@
 
 Backend foundation: TypeScript + Express 5 + PostgreSQL.
 
-This repository currently contains the backend foundation, the database
-schema, and the transactional reservation primitive that hands out temporary
-seat holds. Booking, payments, waitlists, hold-expiry sweeping, email, QR
-codes, Redis, WebSockets, background workers and authentication are
-intentionally not implemented yet.
+This repository contains the backend foundation, the database schema, and the
+transactional machinery behind reservation holds, booking confirmation and
+cancellation, ticketing, and the waitlist and time-limited offer engine.
+Payments, email, QR codes, WebSockets and search/discovery are intentionally
+not implemented yet.
 
 ## Requirements
 
@@ -55,6 +55,8 @@ npm start
 | `npm run migrate:create` | Scaffold a new TypeScript migration                  |
 | `npm run worker`         | Run the hold expiration worker                       |
 | `npm run worker:dev`     | Run the worker with hot reload                       |
+| `npm run worker:waitlist` | Run the waitlist allocation worker                  |
+| `npm run worker:waitlist:dev` | Run the waitlist worker with hot reload         |
 | `npm test`               | Run the integration tests (needs a migrated DB and Redis) |
 
 ## Endpoints
@@ -72,6 +74,9 @@ npm start
 | `POST` | `/api/v1/events/:eventId/holds` | Temporarily hold seats. **Auth.**   |
 | `POST` | `/api/v1/events/:eventId/holds/:holdId/confirm` | Convert a hold into a booking. **Auth.** |
 | `POST` | `/api/v1/bookings/:bookingId/cancel` | Cancel a booking and release its seats. **Auth.** |
+| `POST` | `/api/v1/events/:eventId/waitlist` | Join the waitlist for a seat category. **Auth.** |
+| `POST` | `/api/v1/events/:eventId/waitlist/:entryId/leave` | Leave the waitlist. **Auth.** |
+| `POST` | `/api/v1/waitlist/offers/:offerId/accept` | Accept a time-limited waitlist offer. **Auth.** |
 
 Neither endpoint returns configuration, credentials or connection details.
 `/health/ready` responds `503` with `{"dependencies":{"database":"down"}}` when
@@ -108,6 +113,10 @@ migrations/                versioned schema migrations (node-pg-migrate)
 | `reservation_hold_seats` | which show seats a hold covers                |
 | `idempotency_keys` | stored responses that make a retried write safe to repeat |
 | `refresh_tokens` | server-side session state; stores digests, never tokens |
+| `waitlist_entries` | a customer's queue position for one event and seat category |
+| `waitlist_offers` | a time-limited offer of one seat, wrapping a `reservation_holds` row |
+| `waitlist_allocation_outbox` | durable "an event/category may have a seat to offer" signal |
+| `waitlist_notification_outbox` | durable "tell this user" signal; unconsumed until a notification worker exists |
 
 ### Physical seats vs. show seats
 
@@ -1214,6 +1223,307 @@ Design rules applied throughout:
 - indexes on foreign keys and on the columns real queries filter by
 - `updated_at` maintained by a database trigger, not by application code
 
+## Waitlist and time-limited offers
+
+When an event/category is sold out, a customer can queue for it. When a seat
+frees up - a cancellation, or another customer's hold simply lapsing - it is
+offered to whoever has waited longest, for a limited time. If they do not act,
+the next candidate gets it.
+
+```
+POST /api/v1/events/:eventId/waitlist            join the queue
+POST /api/v1/events/:eventId/waitlist/:id/leave   leave it
+POST /api/v1/waitlist/offers/:offerId/accept      accept a time-limited offer
+```
+
+### An offer is a reservation hold
+
+This is the central design decision, and everything else follows from it.
+Inspecting `reservation_holds` before adding anything found it already means
+exactly what an offer needs: one user's time-limited claim on seats of one
+event, with expiry decided by PostgreSQL and a release path that already
+exists and is already tested. `waitlist_offers` does not duplicate that state
+machine - it wraps one `reservation_holds` row (`hold_id`, `UNIQUE`) and adds
+only what a hold does not carry: which waitlist entry earned it, and its own
+status for the waitlist-facing API. Seat ownership itself - `available` /
+`held` / `booked` - is still decided by `show_seats` and `reservation_holds`
+alone, exactly as everywhere else in this system.
+
+The payoff is that offer creation and offer acceptance need no new booking
+logic at all:
+
+- **creating** an offer is one call to `createHoldInTransaction`, the same
+  function `POST /events/:eventId/holds` uses, for one seat and the offered
+  candidate's `userId`.
+- **accepting** an offer is one call to `confirmHoldInTransaction`, the same
+  function `POST .../holds/:holdId/confirm` uses, against that hold's id.
+- **expiring** an offer rides the *existing* hold-expiration sweep. There is
+  no second worker polling `expires_at`; `expireHoldInTransaction` (see
+  "Hold expiration" above) was extended to notice, after it frees
+  a hold's seats, whether that hold was backing a waitlist offer, and if so
+  marks the offer and its entry `expired` in the same transaction. One clock,
+  one sweep, one place that decides a hold's time is up - not two racing each
+  other over the same row.
+
+The alternative - a separate `held_for_offer` seat state, or a hand-rolled
+expiry timer for offers - was rejected because it would recreate a state
+machine that already exists, already has tests, and already has the seat-lock
+discipline every other path relies on. See "Database constraints" below for why that discipline still needed one *new* thing: a way to say "this seat
+belongs to at most one live offer or hold", which `reservation_holds` alone
+does not express for the waitlist's own bookkeeping table.
+
+### Entry state machine
+
+```
+waiting ──> offered ──> accepted
+   │            │
+   │            └──> expired
+   └──> cancelled
+```
+
+`accepted`, `expired` and `cancelled` are terminal. In particular:
+
+- `expired -> waiting` does not exist. A customer whose offer lapses does not
+  re-queue at the front of a line they already had their turn at - they are
+  done, and the *next* candidate gets the next offer. Joining again starts a
+  fresh entry, at the back of the queue.
+- `waiting -> cancelled` (`.../waitlist/:id/leave`) exists in the schema and
+  the guarded transition, though it is not part of the task's required test
+  matrix - it exists because the state machine documents it, and the endpoint
+  is the minimal thing that reaches it.
+
+Every transition is a single guarded `UPDATE ... WHERE status = '<from>'`, the
+same discipline every other state machine in this codebase uses: a repeated
+transition changes zero rows and is treated as a refusal, never assumed to be
+a success.
+
+### Offer state machine
+
+```
+offered ──> accepted
+   │
+   └──> expired
+```
+
+Deliberately three states, not the four the task sketches as *possible*
+(`offered`/`accepted`/`expired`/`cancelled`). No path in this system ever
+declines or revokes a live offer other than by it lapsing, so a fourth
+`cancelled` state would have no transition that ever produces it - an
+unreachable state is worse than a state that does not exist.
+
+### Duplicate membership
+
+`waiting` and `offered` both count as **active** membership; `accepted`,
+`expired` and `cancelled` are history. A customer cannot hold two active
+entries for the same event and category - enforced by
+`waitlist_entries_active_membership_key`, a partial unique index on
+`(event_id, user_id, seat_category) WHERE status IN ('waiting', 'offered')` -
+but a customer whose earlier attempt ended in one of the three terminal states
+is free to join again. This is a database constraint, not a check-then-insert:
+`joinWaitlistInTransaction` never `SELECT`s before it `INSERT`s, because a
+check-then-insert has exactly the race window a partial unique index closes
+for free. Two concurrent joins collide on the index; the loser gets a
+constraint violation, mapped to the same `409 ALREADY_ON_WAITLIST` a client
+would see calling it twice in sequence.
+
+### FIFO order, and why availability is not gated at join time
+
+Queue order is `(joined_at, id)`, read at query time - never stored as a
+mutable `position`. A stored position would need renumbering every time
+someone leaves ahead of others; `(joined_at, id)` is one `ORDER BY` away from
+being computed for free, and `id` is a deterministic tie-breaker for the case
+two entries share a `joined_at`, which a burst of concurrent joins can
+genuinely produce.
+
+Joining does **not** check whether the category is actually sold out. The
+task's own validation list does not include an availability gate, and is
+explicit that a join must not be made impossible by a seat freeing up between
+a check and the join's own transaction - so this implementation does not try
+to enforce "sold out" as a hard precondition at all. A customer choosing to
+queue for a category that happens to have seats open right now costs the
+system nothing; the allocation pass is what actually decides who gets a seat,
+and it is unaffected by why someone joined.
+
+### Cancellation creates an opportunity; it does not act on one
+
+`cancelBookingInTransaction` and `expireHoldInTransaction` are the only two
+places a seat is ever released to `available` (see "Lock order" below). Both, after releasing, call
+`enqueueWaitlistAllocationForSeats` - a plain `INSERT` naming the event and
+category, coalesced against any already-pending signal for that same pair via
+a partial unique index and `ON CONFLICT ... DO NOTHING`. Neither function
+scans the waitlist, locks a candidate, or creates an offer itself: the whole
+point is that the HTTP request confirming a cancellation stays fast and holds
+no lock longer than releasing its own seats needs.
+
+```
+booking cancelled / hold expired
+        │
+        ▼
+show_seats -> available          (same transaction)
+        │
+        ▼
+waitlist_allocation_outbox row   (same transaction, coalesced)
+        │                           = "look at event X, category Y"
+        ▼
+waitlist allocation worker       (separate process, separate transaction)
+        │
+        ▼
+offer created, notification enqueued
+```
+
+### The allocation pass
+
+One worker transaction per claimed outbox row, pairing seats and candidates
+deterministically - seats ascending by id, candidates FIFO - until either runs
+out:
+
+```
+loop:
+  lock the next waiting candidate    FOR UPDATE SKIP LOCKED, ORDER BY joined_at, id
+  if none: stop
+  read the next available seat        ascending id, unlocked
+  if none: stop (the candidate stays `waiting`, still locked by this transaction)
+  mark the candidate `offered`
+  createHoldInTransaction(...)        the seat's actual lock and claim
+  insert the waitlist_offers row
+  enqueue a WAITLIST_OFFER_CREATED notification
+mark the outbox row processed
+```
+
+`SKIP LOCKED` on the **candidate** scan, never on the **seat**: skipping a
+locked queue position just means another worker already has it, but silently
+abandoning a specific seat is a different kind of mistake, so the seat's own
+lock (inside `createHoldInTransaction`) is a plain, blocking `FOR UPDATE`. A
+`SAVEPOINT` wraps each attempted pairing: if the seat this pass read as
+available gets claimed by an ordinary reservation microseconds before
+`createHoldInTransaction` re-locks it, only that one pairing rolls back - the
+candidate reverts to `waiting`, still held by this transaction's own lock -
+and the loop retries it against a freshly read seat list, rather than undoing
+every offer already made earlier in the same pass.
+
+Two workers claiming the *same* outbox row cannot happen - the coalescing
+index guarantees at most one pending row per (event, category), and
+`FOR UPDATE SKIP LOCKED` at the claim gives whoever gets it sole ownership of
+that pass. Two workers processing genuinely *different* signals that happen to
+touch overlapping seats are still safe: the seat lock inside
+`createHoldInTransaction` is a real, blocking lock, so the second worker
+simply waits, then re-reads a seat list that no longer includes what the first
+worker just took.
+
+There is a self-healing **reconcile** loop alongside allocation, mirroring
+`reconcileExpiryKeys` for the same reason: every path that frees a seat
+already enqueues a signal, but "the worker was down when it mattered" is worth
+a slow, bounded backstop for. It scans for event/categories with a waiting
+candidate and an available seat but no pending outbox row, and enqueues one.
+
+### Accepting an offer, and why it cannot deadlock with expiry
+
+`POST /waitlist/offers/:offerId/accept` does an unlocked, ownership-only read
+of the offer (an honest 404 for "not yours", nothing more), then hands the
+offer's `hold_id` straight to `confirmHoldInTransaction` - the exact function
+a direct hold confirmation uses. Only *after* that succeeds does it stamp
+`waitlist_offers` and `waitlist_entries` `accepted`.
+
+That ordering is what makes acceptance and expiry safe to race. Both reach
+`reservation_holds` through the identical path - `show_seats` locked first,
+then the hold - and both touch `waitlist_offers` only afterwards:
+`confirmHoldInTransaction` on the accept side, `markOfferExpiredByHoldId` on
+the expiry side (inside `expireHoldInTransaction`). So the two locks are
+always taken in the same order by both paths, and whichever transaction wins
+the hold's lock decides the outcome; the loser's own guarded transition on
+`reservation_holds` simply matches zero rows, and its later, offer-specific
+UPDATE is never reached because the earlier step already threw.
+`confirmHoldInTransaction`'s `HOLD_EXPIRED` / `HOLD_INVALID` become
+`OFFER_EXPIRED` for the customer; `HOLD_ALREADY_CONFIRMED` becomes
+`OFFER_ALREADY_ACCEPTED`.
+
+### Lock order
+
+Waitlist operations extend the existing global order rather than
+contradicting it. The order confirmation and cancellation already established:
+
+```
+idempotency_keys  ->  bookings  ->  show_seats (ascending id)  ->  reservation_holds
+```
+
+becomes, with the waitlist paths folded in:
+
+```
+idempotency_keys  ->  bookings  ->  waitlist_offers  ->  show_seats (ascending id)  ->  reservation_holds
+waitlist_allocation_outbox  ->  waitlist_entries  ->  show_seats (ascending id)  ->  reservation_holds
+```
+
+Two observations make this safe rather than merely hopeful:
+
+- **Acceptance and expiry** both take `waitlist_offers` only *after* `show_seats`
+  and `reservation_holds` - see the previous section - so they sit on the
+  correct side of the existing order, not before it.
+- **Allocation** takes `waitlist_entries` (via the candidate lock), then
+  `show_seats`/`reservation_holds` (via `createHoldInTransaction`), and never
+  touches an *existing* `waitlist_offers` row - it only ever inserts a fresh
+  one, which needs no lock. Nothing in this system ever locks `show_seats` or
+  `reservation_holds` and *then* reaches back to lock `waitlist_entries` or an
+  existing `waitlist_offers` row, so no cycle is possible between the
+  allocation path and either of the others.
+
+`enqueueWaitlistAllocationForSeats`, called from both `cancelBookingInTransaction`
+and `expireHoldInTransaction`, takes no lock of its own - a plain `INSERT`
+against a row nothing else in that transaction has touched - so it adds
+nothing to this ordering either.
+
+### Database constraints
+
+- `waitlist_entries_active_membership_key` - `UNIQUE (event_id, user_id,
+  seat_category) WHERE status IN ('waiting', 'offered')`. See
+  "Duplicate membership" above.
+- `waitlist_offers_active_seat_key` - `UNIQUE (show_seat_id) WHERE status =
+  'offered'`, and `waitlist_offers_active_entry_key` - `UNIQUE
+  (waitlist_entry_id) WHERE status = 'offered'`. Both are **backstops, not the
+  primary defence** - see "Negative controls" below for why that distinction
+  was actually measured, not assumed.
+- `waitlist_offers_hold_id_key` - `UNIQUE (hold_id)`: exactly one offer per
+  backing hold, which is also structurally guaranteed by construction (each
+  offer creates a fresh hold), but made a real constraint anyway.
+- `waitlist_allocation_outbox_pending_key` - `UNIQUE (event_id, seat_category)
+  WHERE processed_at IS NULL`: the coalescing index described above.
+- `..._accepted_at_consistency_check` / `..._expired_at_consistency_check` on
+  `waitlist_offers`: each timestamp is present exactly when its status says it
+  should be, the same discipline `tickets_used_at_consistency_check` applies.
+
+### Negative controls
+
+Each mechanism below was temporarily removed, the relevant tests re-run to
+capture the failure, and the code restored byte-for-byte (verified by hash)
+before moving to the next:
+
+| Removed | Result |
+| --- | --- |
+| `waitlist_entries_active_membership_key` | All 50 concurrent duplicate-join attempts succeeded - `50 !== 1`. **Corruption.** This index is the primary defence; there is no row lock protecting it, because there is no existing row to lock until the `INSERT` itself resolves the race. |
+| `waitlist_offers_active_seat_key` | No test failed. Fabricating two `offered` rows for the same seat by inserting directly into the table, bypassing the service entirely, still succeeded - proving the constraint *can* be violated with it gone - but every service-level path was already prevented from reaching that state by the seat's own row lock inside `createHoldInTransaction`. Backstop, not primary defence, exactly as `booking_seats_show_seat_id_key` was found to be in the cancellation task. |
+| the `status = 'offered'` guard on `markOfferAccepted` | No test failed, for the same reason: `confirmHoldInTransaction`'s own guard on `reservation_holds.status` is what actually prevents a second acceptance from doing anything - the offer-row guard removed here is a second, redundant expression of a rule the hold's own state machine already enforces. |
+| the `ORDER BY joined_at, id` on the candidate query | The plain "offers the first joiner" test still passed - a small, freshly inserted table tends to return rows in insertion order even unordered, which is a false negative waiting to happen. A test that inserts candidates in one order but gives them `joined_at` values in the *opposite* order caught it immediately: the wrong candidate was offered the seat. Kept as a permanent regression test precisely because it is the only one of the FIFO tests that would fail without the `ORDER BY`. |
+
+### What is deferred
+
+No email, no QR codes, no push notifications - `waitlist_notification_outbox`
+is a durable producer with no consumer yet, carrying only safe identifiers
+(`offerId`, `waitlistEntryId`, `userId`, `eventId`, `showSeatId`, `expiresAt`).
+A future notification worker claims rows from it exactly the way the
+allocation worker claims from `waitlist_allocation_outbox` - `FOR UPDATE SKIP
+LOCKED`, mark-processed-or-back-off - and sends whatever it sends. Nothing
+here calls out to email, SMS or push while holding a lock, or at all.
+
+**Token security for a future email link.** The authenticated `accept`
+endpoint uses `offerId` + the caller's session identity, which is sufficient
+today because every caller is already authenticated. A future "accept from
+your email" link cannot rely on the same thing - a bare `offerId` in a URL is
+then the only credential, and offer ids are sequential-looking UUIDs handed
+out at a predictable rate. That link would need its own single-use, expiring
+token (an opaque random value, stored **hashed** - the same pattern
+`refresh_tokens` already uses for exactly this reason), checked instead of, not
+in addition to, requiring a login. Not built now; noted so it is not
+accidentally built as "just check the offer id."
+
 ## Tests
 
 The suite is integration-level: it exercises the real schema and a real Redis,
@@ -1226,7 +1536,7 @@ npm run migrate:up
 npm test
 ```
 
-Three suites deserve mention. `rate-limit.distributed.test.ts` spawns **two real
+A few suites deserve mention. `rate-limit.distributed.test.ts` spawns **two real
 API processes** against one Redis and alternates requests between them, which is
 the only way to tell a shared counter from a process-local one.
 `redis.failure.test.ts` drops the connection mid-suite to prove the fail-closed
@@ -1236,6 +1546,17 @@ booking and races cancellation against reservation, confirmation and the
 expiration worker; the races are jittered so both outcomes actually occur rather
 than one side always winning on timing, and each round re-checks the same set of
 cross-table invariants.
+`waitlist.concurrency.test.ts` runs the same style of race against the waitlist:
+50 concurrent joins, 5 simulated allocation workers racing for one seat across
+several expire-and-reoffer rounds, and a cancellation/reservation/allocation
+three-way race, each round re-checking that a seat never has two owners and a
+queue position never holds two live offers. `waitlist-allocation.test.ts` and
+`waitlist-offer-accept.test.ts` drive the allocation pass and the accept/expire
+paths directly - the same functions the real worker calls, run inline rather
+than by spawning the worker process - including the end-to-end scenario the
+task itself poses: a booking cancels, the first waiter's offer lapses, the
+second accepts, and a third candidate never gets an offer because only one
+seat ever existed.
 
 Rate limits are live during tests. Rather than disabling the middleware, each
 suite presents a distinct `X-Forwarded-For` so its identifiers are isolated;

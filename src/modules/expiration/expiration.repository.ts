@@ -170,6 +170,8 @@ export async function lockSeats(db: Queryable, showSeatIds: readonly string[]): 
 export interface LockedHold {
   status: string;
   due: boolean;
+  userId: string;
+  eventId: string;
 }
 
 /**
@@ -179,10 +181,16 @@ export interface LockedHold {
  * lock is held - not against a timestamp the worker was handed earlier. That
  * re-check is what makes Redis non-authoritative: a signal only ever prompts a
  * look at the database, and the database decides.
+ *
+ * `user_id`/`event_id` are read alongside the status this function already
+ * needed, not for anything expiry itself does with them - they exist so a
+ * caller that finds this hold was backing a waitlist offer (see
+ * expireHoldInTransaction) can build that offer's expiry notification without
+ * a second round trip.
  */
 export async function lockHold(db: Queryable, holdId: string): Promise<LockedHold | null> {
-  const result = await db.query<{ status: string; due: boolean }>(
-    `SELECT status, (expires_at <= now()) AS due
+  const result = await db.query<{ status: string; due: boolean; user_id: string; event_id: string }>(
+    `SELECT status, (expires_at <= now()) AS due, user_id, event_id
      FROM reservation_holds
      WHERE id = $1
      FOR UPDATE`,
@@ -190,7 +198,7 @@ export async function lockHold(db: Queryable, holdId: string): Promise<LockedHol
   );
 
   const row = result.rows[0];
-  return row ? { status: row.status, due: row.due } : null;
+  return row ? { status: row.status, due: row.due, userId: row.user_id, eventId: row.event_id } : null;
 }
 
 /** Transitions a locked, verified hold to expired. Returns whether it changed. */

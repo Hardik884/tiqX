@@ -47,12 +47,16 @@ export interface SeededVenue {
 /**
  * Creates a venue with `seatCount` seats in a single row, e.g. A1..A3.
  * `firstSeatNumber` shifts the numbering, so A12..A14 is seedVenue(3, 'A', 12).
+ * `city` defaults to null, matching every pre-existing caller; pass a real
+ * city for a discovery/search test. `category` defaults to 'standard'; pass
+ * 'premium' for a category-specific test (see waitlist tests).
  */
 export async function seedVenue(
   seatCount: number,
   rowLabel = 'A',
   firstSeatNumber = 1,
   city: string | null = null,
+  category: 'standard' | 'premium' = 'standard',
 ): Promise<SeededVenue> {
   const venue = await query<IdRow>(
     `INSERT INTO venues (name, description, city) VALUES ($1, $2, $3) RETURNING id`,
@@ -67,9 +71,9 @@ export async function seedVenue(
   for (let seatNumber = firstSeatNumber; seatNumber <= lastSeatNumber; seatNumber += 1) {
     const seat = await query<IdRow>(
       `INSERT INTO venue_seats (venue_id, row_label, seat_number, category)
-       VALUES ($1, $2, $3, 'standard')
+       VALUES ($1, $2, $3, $4)
        RETURNING id`,
-      [venueId, rowLabel, seatNumber],
+      [venueId, rowLabel, seatNumber, category],
     );
     seatIds.push(seat.rows[0]!.id);
   }

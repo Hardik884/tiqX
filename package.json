@@ -9,6 +9,8 @@
     "start": "node dist/server.js",
     "worker": "tsx src/workers/hold-expiration.worker.ts",
     "worker:dev": "tsx watch src/workers/hold-expiration.worker.ts",
+    "worker:waitlist": "tsx src/workers/waitlist-allocation.worker.ts",
+    "worker:waitlist:dev": "tsx watch src/workers/waitlist-allocation.worker.ts",
     "typecheck": "tsc -p tsconfig.json",
     "migrate": "tsx node_modules/node-pg-migrate/bin/node-pg-migrate.js",
     "migrate:up": "npm run migrate -- up",
