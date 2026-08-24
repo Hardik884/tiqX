@@ -9,7 +9,7 @@ export const EVENT_STATUSES = ['draft', 'published', 'cancelled', 'completed'] a
  * small, curated vocabulary added for public discovery; see the
  * `1787508000000_event-discovery` migration for why it did not exist before.
  */
-export const EVENT_CATEGORIES = ['music', 'comedy', 'sports', 'theatre', 'other'] as const;
+export const EVENT_CATEGORIES = ['music', 'comedy', 'sports', 'theatre', 'movies', 'other'] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
 export type EventStatus = (typeof EVENT_STATUSES)[number];

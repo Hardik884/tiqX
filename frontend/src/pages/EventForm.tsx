@@ -7,7 +7,7 @@ import { api, ApiError } from '../lib/api';
 import type { EventCategory, EventType, EventView, FieldError, Venue } from '../lib/types';
 
 const EVENT_TYPES: EventType[] = ['movie', 'concert'];
-const CATEGORIES: EventCategory[] = ['music', 'comedy', 'sports', 'theatre', 'other'];
+const CATEGORIES: EventCategory[] = ['music', 'comedy', 'sports', 'theatre', 'movies', 'other'];
 
 function toLocalInputValue(iso: string | undefined): string {
   if (!iso) return '';

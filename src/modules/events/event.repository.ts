@@ -524,6 +524,44 @@ export interface PublicEventQuery {
  * table (`venues`) small enough that `ILIKE` over it, joined in, costs
  * nothing at any realistic scale. See the migration and the final report for
  * the full comparison against trigram search.
+ *
+ * PREFIX MATCHING, NOT `websearch_to_tsquery` ALONE. `websearch_to_tsquery`
+ * only ever matches complete (stemmed) lexemes: searching "inter" against a
+ * title of "Interstellar" is `false`, because "inter" and "interstellar" are
+ * two different lexemes to the English dictionary - a query is not
+ * meaningfully searchable while a customer has to finish typing every word.
+ * The subquery below tokenises and stems the caller's search text the same
+ * way `to_tsvector` would (so "Journey" and "journeys" still normalise the
+ * same), then re-joins those lexemes into a `:*`-suffixed, `&`-separated
+ * prefix query - the standard construction for "search-as-you-type" over
+ * `tsvector`.
+ *
+ * THE REASSEMBLY MUST BE `::tsquery`, NEVER `to_tsquery(config, text)`.
+ * `to_tsquery` re-runs its argument through the *same tokeniser and
+ * dictionary pipeline* `to_tsvector` uses, on every lexeme, even one already
+ * extracted from a tsvector - so a lexeme containing a hyphen (a UUID
+ * fragment in a title, a compound word) gets re-split into a `<->` phrase
+ * of sub-lexemes instead of staying the one atomic token it already was.
+ * That silently drops real matches: PostgreSQL's parser resolves a
+ * hyphenated span like "2fe0-437b" into non-obvious sub-tokens - which
+ * digit/letter boundary looks numeric to it is undocumented and
+ * inconsistent - so a lexeme this codebase's own tokenisation already
+ * produced can come back different, or missing, on the second pass. Casting
+ * a `'lexeme':*`-shaped string straight to `::tsquery` uses tsquery's
+ * external *input* syntax instead: a single-quoted span is taken as one
+ * already-finished lexeme, verbatim, with no further tokenising or
+ * stemming. `quote_literal` is what produces that single-quoted, correctly
+ * '' - escaped span - the same escaping convention tsquery's own syntax
+ * uses - so nothing here is ever concatenated into a query string
+ * PostgreSQL parses as SQL or as a raw search string, and a caller cannot
+ * smuggle tsquery syntax through `q`.
+ *
+ * A `q` that is entirely stop words (`the`, `a`, ...) reduces to zero
+ * lexemes, `string_agg` returns `NULL`, and `NULL::tsquery` is `NULL`, so
+ * `@@ NULL` is `NULL` (never a match, never an error) - the same "no
+ * full-text match" outcome `websearch_to_tsquery` already produced for that
+ * case, so this is not a behaviour change for a query that was already
+ * unsearchable.
  */
 export async function findPublicEventsPage(
   db: Queryable,
@@ -562,7 +600,10 @@ export async function findPublicEventsPage(
     const qParam = bind(filters.q);
     const likeParam = bind(`%${filters.q}%`);
     conditions.push(
-      `(e.search_vector @@ websearch_to_tsquery('english', $${qParam}) OR v.name ILIKE $${likeParam})`,
+      `(e.search_vector @@ (
+         SELECT string_agg(quote_literal(lexeme) || ':*', ' & ')::tsquery
+         FROM unnest(tsvector_to_array(to_tsvector('english', $${qParam}))) AS lexeme
+       ) OR v.name ILIKE $${likeParam})`,
     );
   }
 

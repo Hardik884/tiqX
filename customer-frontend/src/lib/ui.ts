@@ -8,6 +8,7 @@ const CATEGORY_LABELS: Record<EventCategory, string> = {
   comedy: 'Comedy',
   sports: 'Sports',
   theatre: 'Theatre',
+  movies: 'Movies',
   other: 'Other',
 };
 
@@ -21,6 +22,7 @@ const CATEGORY_STYLES: Record<EventCategory, { band: string; text: string; dot: 
   comedy: { band: 'from-amber-500 to-orange-600', text: 'text-amber-700', dot: 'bg-amber-500' },
   sports: { band: 'from-emerald-600 to-teal-700', text: 'text-emerald-700', dot: 'bg-emerald-600' },
   theatre: { band: 'from-sky-600 to-indigo-700', text: 'text-sky-700', dot: 'bg-sky-600' },
+  movies: { band: 'from-rose-600 to-red-700', text: 'text-rose-700', dot: 'bg-rose-600' },
   other: { band: 'from-ink-700 to-ink-900', text: 'text-ink-700', dot: 'bg-ink-700' },
 };
 

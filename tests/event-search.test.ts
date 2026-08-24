@@ -211,6 +211,39 @@ describe('GET /api/v1/events - search (q)', () => {
     assert.ok(reply.json.items!.some((i) => i.id === event.id), 'the English stemmer reduces "rocking" to "rock"');
   });
 
+  it('matches an incomplete (prefix) word, not just a complete one', async () => {
+    const { seedEvent } = await seedCatalog();
+    const unique = randomUUID().slice(0, 8);
+    const event = await seedEvent({ title: `Interstellar ${unique} Live`, startsAt: '2031-03-06T18:00:00.000Z' });
+
+    // "inter" is a real prefix of "interstellar" but not itself a lexeme
+    // `websearch_to_tsquery` would ever match against it - see
+    // event.repository.ts::findPublicEventsPage for why plain
+    // `websearch_to_tsquery` alone cannot do this.
+    const prefixOfFirstWord = await list(`q=${encodeURIComponent(`inter ${unique}`)}`);
+    assert.ok(
+      prefixOfFirstWord.json.items!.some((i) => i.id === event.id),
+      'a prefix of the title\'s first word should match',
+    );
+
+    const partialUnique = await list(`q=${encodeURIComponent(unique.slice(0, 4))}`);
+    assert.ok(
+      partialUnique.json.items!.some((i) => i.id === event.id),
+      'a prefix of a later word should also match',
+    );
+  });
+
+  it('does not treat a prefix match as a substring match anywhere in the word', async () => {
+    const { seedEvent } = await seedCatalog();
+    const unique = randomUUID().slice(0, 8);
+    const event = await seedEvent({ title: `Interstellar ${unique}`, startsAt: '2031-03-07T18:00:00.000Z' });
+
+    // "stellar" is a real substring of "interstellar" but not a prefix of it,
+    // so it must not match - this is prefix search, not substring search.
+    const reply = await list(`q=${encodeURIComponent(`stellar ${unique}`)}`);
+    assert.ok(!reply.json.items!.some((i) => i.id === event.id));
+  });
+
   it('matches by venue name even though venue name is not in the tsvector', async () => {
     const organiserId = await seedOrganiser();
     const uniqueVenueName = `Grand Arena ${randomUUID()}`;

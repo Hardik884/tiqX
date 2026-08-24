@@ -14,7 +14,7 @@ export interface AuthResponse {
   refreshTokenExpiresAt: string;
 }
 
-export type EventCategory = 'music' | 'comedy' | 'sports' | 'theatre' | 'other';
+export type EventCategory = 'music' | 'comedy' | 'sports' | 'theatre' | 'movies' | 'other';
 export type EventType = 'movie' | 'concert';
 export type EventSortMode = 'start_asc' | 'start_desc' | 'name_asc' | 'name_desc';
 

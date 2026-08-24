@@ -10,7 +10,7 @@ export interface PublicUser {
 
 export type EventStatus = 'draft' | 'published' | 'cancelled' | 'completed';
 export type EventType = 'movie' | 'concert';
-export type EventCategory = 'music' | 'comedy' | 'sports' | 'theatre' | 'other';
+export type EventCategory = 'music' | 'comedy' | 'sports' | 'theatre' | 'movies' | 'other';
 
 export interface EventView {
   id: string;

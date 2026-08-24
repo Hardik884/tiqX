@@ -26,19 +26,43 @@ describe('event discovery migration', () => {
     assert.ok(await hasColumn('events', 'category'));
     assert.ok(await hasColumn('events', 'search_vector'));
 
-    const steps = await stepsToRollBack(MIGRATION_NAME);
-    await migrate('down', steps);
-
-    assert.equal(await hasColumn('venues', 'city'), false);
-    assert.equal(await hasColumn('events', 'category'), false);
-    assert.equal(await hasColumn('events', 'search_vector'), false);
-
-    // Nothing this migration didn't touch should be affected by rolling it back.
-    for (const table of ['events', 'venues', 'show_seats', 'bookings', 'tickets', 'reservation_holds']) {
-      assert.ok(await tableExists(table), `${table} must survive the rollback`);
+    // Rolling this migration back also rolls back everything layered on top
+    // of it (`1787522400000_movies-category` included), and that migration's
+    // own down() re-adds a CHECK that no longer allows 'movies' - which
+    // PostgreSQL enforces against every existing row. This is a shared dev
+    // database, not a disposable one, so a real 'movies' event (created
+    // through the API, not this suite) would otherwise turn an unrelated
+    // migration test red. Shielding it - a temporary reclassification, never
+    // a delete - proves the same round-trip without touching real data, then
+    // restores it exactly once the constraint allows 'movies' again.
+    const shielded = await query<{ id: string }>("SELECT id FROM events WHERE category = 'movies'");
+    if (shielded.rows.length > 0) {
+      await query("UPDATE events SET category = 'other' WHERE id = ANY($1::uuid[])", [
+        shielded.rows.map((row) => row.id),
+      ]);
     }
 
-    await migrate('up');
+    try {
+      const steps = await stepsToRollBack(MIGRATION_NAME);
+      await migrate('down', steps);
+
+      assert.equal(await hasColumn('venues', 'city'), false);
+      assert.equal(await hasColumn('events', 'category'), false);
+      assert.equal(await hasColumn('events', 'search_vector'), false);
+
+      // Nothing this migration didn't touch should be affected by rolling it back.
+      for (const table of ['events', 'venues', 'show_seats', 'bookings', 'tickets', 'reservation_holds']) {
+        assert.ok(await tableExists(table), `${table} must survive the rollback`);
+      }
+
+      await migrate('up');
+    } finally {
+      if (shielded.rows.length > 0) {
+        await query("UPDATE events SET category = 'movies' WHERE id = ANY($1::uuid[])", [
+          shielded.rows.map((row) => row.id),
+        ]);
+      }
+    }
 
     assert.ok(await hasColumn('venues', 'city'));
     assert.ok(await hasColumn('events', 'category'));

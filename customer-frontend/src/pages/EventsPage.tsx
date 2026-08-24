@@ -8,7 +8,7 @@ import { EmptyState, ErrorState, EventCardSkeleton } from '../components/Feedbac
 import { CalendarIcon, ChevronDownIcon, MapPinIcon, SearchIcon } from '../components/icons';
 import { CONTAINER, categoryLabel } from '../lib/ui';
 
-const CATEGORIES: EventCategory[] = ['music', 'comedy', 'sports', 'theatre', 'other'];
+const CATEGORIES: EventCategory[] = ['music', 'comedy', 'sports', 'theatre', 'movies', 'other'];
 const SORTS: { value: EventSortMode; label: string }[] = [
   { value: 'start_asc', label: 'Date: soonest first' },
   { value: 'start_desc', label: 'Date: latest first' },
