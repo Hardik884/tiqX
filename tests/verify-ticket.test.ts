@@ -166,16 +166,29 @@ describe('verifying a ticket', () => {
     assert.equal(row.rows[0]!.status, 'issued');
   });
 
-  it('lets any organiser verify, not only the event\'s own - scoping is deferred, see ticket.routes.ts', async () => {
+  it('rejects an organiser who does not own this ticket\'s event', async () => {
     const booking = await seedConfirmedBooking(1);
     const { ticketId } = await issueOne(booking.bookingId, booking.userId);
     const otherOrganiser = await seedCustomer();
     await query("UPDATE users SET role = 'organiser' WHERE id = $1", [otherOrganiser]);
 
-    // Documents the current, deliberately coarse role gate: it is a role
-    // check, not an ownership check, so an organiser unrelated to this event
-    // can still verify its tickets today.
+    // Resource-level authorization: being *an* organiser is not enough - see
+    // ticket.service.ts::verifyTicketInTransaction.
     const reply = await verify(ticketId, otherOrganiser);
+    assert.equal(reply.status, 404);
+    assert.equal(reply.json.error?.details?.reason, 'TICKET_NOT_FOUND');
+
+    const row = await query<{ status: string }>('SELECT status FROM tickets WHERE id = $1', [ticketId]);
+    assert.equal(row.rows[0]!.status, 'issued', 'an unauthorized attempt never touches the ticket');
+  });
+
+  it('lets an admin verify any event\'s ticket', async () => {
+    const booking = await seedConfirmedBooking(1);
+    const { ticketId } = await issueOne(booking.bookingId, booking.userId);
+    const admin = await seedCustomer();
+    await query("UPDATE users SET role = 'admin' WHERE id = $1", [admin]);
+
+    const reply = await verify(ticketId, admin);
     assert.equal(reply.status, 200);
   });
 });

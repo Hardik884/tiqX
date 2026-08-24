@@ -249,6 +249,15 @@ export async function issueTicketsInTransaction(
  * Either way, `bookings.status = 'cancelled' AND tickets.status = 'used'` is
  * unreachable for this ticket - not merely unlikely.
  *
+ * RESOURCE AUTHORIZATION. `lockBookingForTickets` already resolves the
+ * event's organiser as part of the same lookup ticket issuance uses it for,
+ * so verification spends no extra round trip to also require the caller be
+ * *that* event's organiser (or an admin) - not merely *an* organiser, which
+ * is all the route's role gate can tell. An organiser who does not own this
+ * ticket's event gets exactly `TICKET_NOT_FOUND`, before the ticket row is
+ * touched at all, so they learn nothing about it - not its state, not
+ * whether it has been used - by probing a ticket id that is not theirs.
+ *
  * No Idempotency-Key: a retried scan is not the same request as the first
  * one succeeding. The state machine already answers a retry correctly and
  * distinctly - `TICKET_ALREADY_USED` - which is the honest answer to "was
@@ -276,6 +285,23 @@ export async function verifyTicketInTransaction(
       requestId,
       ticketId: input.ticketId,
       bookingId,
+    });
+    throw ticketNotFound();
+  }
+
+  if (input.userRole !== 'admin' && booking.eventOrganiserId !== input.userId) {
+    // Resource authorization: role gets an organiser/admin this far (see
+    // ticket.routes.ts), but being *an* organiser does not mean owning *this*
+    // ticket's event. Checked before the booking-status check and before the
+    // ticket is even read, so an organiser who does not own this event learns
+    // nothing about it - not even whether it has already been used - and
+    // gets the same answer as a ticket id that does not exist at all.
+    logger.warn('Rejected ticket verification', {
+      requestId,
+      ticketId: input.ticketId,
+      bookingId,
+      userId: input.userId,
+      reason: 'TICKET_NOT_OWNED',
     });
     throw ticketNotFound();
   }

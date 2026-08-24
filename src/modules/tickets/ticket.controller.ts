@@ -133,9 +133,10 @@ export async function verifyTicketHandler(req: Request, res: Response): Promise<
     throw new BadRequestError('Invalid ticket id', toFieldErrors(params.error.issues));
   }
 
+  const { id: userId, role: userRole } = requireUser(req);
   const requestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : undefined;
 
-  const result = await verifyTicket({ ticketId: params.data.ticketId }, requestId);
+  const result = await verifyTicket({ ticketId: params.data.ticketId, userId, userRole }, requestId);
 
   const body: VerifyTicketResponseBody = {
     ticketReference: result.ticket.ticketReference,

@@ -36,6 +36,9 @@ export interface IssueTicketsResult {
 
 export interface VerifyTicketInput {
   ticketId: string;
+  /** Always the authenticated principal; never a value from the request body. */
+  userId: string;
+  userRole: UserRole;
 }
 
 export interface VerifyTicketResult {
