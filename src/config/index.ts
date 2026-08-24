@@ -110,6 +110,27 @@ const envSchema = z.object({
   RATE_LIMIT_REGISTER_WINDOW_SECONDS: z.coerce.number().int().positive().default(3_600),
   RATE_LIMIT_REFRESH_MAX: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_REFRESH_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
+
+  // ---------------------------------------------------------------------------
+  // Hold expiration worker
+  // ---------------------------------------------------------------------------
+  // Publishing the Redis signal for newly created holds.
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(1_000),
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(100),
+  // Backoff base for a failed publish: delay is base * 2^(attempts-1), capped.
+  OUTBOX_RETRY_BASE_MS: z.coerce.number().int().min(100).default(1_000),
+  OUTBOX_RETRY_MAX_MS: z.coerce.number().int().min(1_000).default(60_000),
+
+  // Sweeping holds whose time is up. This is the authoritative path: it reads
+  // PostgreSQL, not Redis.
+  EXPIRY_SWEEP_INTERVAL_MS: z.coerce.number().int().min(50).default(1_000),
+  EXPIRY_SWEEP_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(100),
+
+  // Restoring Redis keys that were lost after their outbox row was processed.
+  RECONCILE_INTERVAL_MS: z.coerce.number().int().min(100).default(30_000),
+  RECONCILE_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(200),
+  // How far ahead to look for active holds needing a key.
+  RECONCILE_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -163,6 +184,17 @@ export const config = {
       max: env.RATE_LIMIT_REFRESH_MAX,
       windowSeconds: env.RATE_LIMIT_REFRESH_WINDOW_SECONDS,
     },
+  },
+  expiration: {
+    outboxPollIntervalMs: env.OUTBOX_POLL_INTERVAL_MS,
+    outboxBatchSize: env.OUTBOX_BATCH_SIZE,
+    outboxRetryBaseMs: env.OUTBOX_RETRY_BASE_MS,
+    outboxRetryMaxMs: env.OUTBOX_RETRY_MAX_MS,
+    sweepIntervalMs: env.EXPIRY_SWEEP_INTERVAL_MS,
+    sweepBatchSize: env.EXPIRY_SWEEP_BATCH_SIZE,
+    reconcileIntervalMs: env.RECONCILE_INTERVAL_MS,
+    reconcileBatchSize: env.RECONCILE_BATCH_SIZE,
+    reconcileWindowSeconds: env.RECONCILE_WINDOW_SECONDS,
   },
   auth: {
     jwtSecret: env.JWT_SECRET,

@@ -53,6 +53,8 @@ npm start
 | `npm run migrate:up`     | Apply pending migrations                             |
 | `npm run migrate:down`   | Roll back the most recent migration                  |
 | `npm run migrate:create` | Scaffold a new TypeScript migration                  |
+| `npm run worker`         | Run the hold expiration worker                       |
+| `npm run worker:dev`     | Run the worker with hot reload                       |
 | `npm test`               | Run the integration tests (needs a migrated DB and Redis) |
 
 ## Endpoints
@@ -544,8 +546,9 @@ create a hold owned by another.
 > will stay.
 
 Redis exists here for **ephemeral infrastructure state** - data that may be lost
-without corrupting anything. Today that is exactly one thing: distributed rate
-limiting.
+without corrupting anything. Today that is two things: distributed rate limiting
+and hold expiration *signals*. Everything Redis holds can be deleted without
+changing which seats are available; see [Hold expiration](#hold-expiration).
 
 | Concern | Owner |
 | ------- | ----- |
@@ -553,6 +556,7 @@ limiting.
 | Users, credentials, refresh tokens | PostgreSQL |
 | Idempotency records and stored responses | PostgreSQL |
 | Rate-limit counters | Redis |
+| Hold expiration *signals* (never the decision) | Redis |
 
 ### Running Redis locally
 
@@ -667,6 +671,161 @@ rather than serving traffic it cannot protect - a crash-looping container is a
 louder signal than an API quietly returning 503s. Shutdown closes the HTTP
 server, then Redis, then the PostgreSQL pool, through the existing graceful
 shutdown path.
+
+## Hold expiration
+
+A hold has an `expires_at`. Something has to notice when it passes and give the
+seats back. That job is split between a durable event in PostgreSQL, a signal in
+Redis, and a worker - arranged so that **Redis is never what decides**.
+
+```
+    HTTP API                         Expiration worker
+        │                                    │
+        ▼                          ┌─────────┴──────────┐
+   PostgreSQL                      │  publish  sweep  reconcile
+   ┌────┴─────┐                    │     │       │        │
+   hold     outbox  ───────────────┘     │       │        │
+   state    event                        │       │        │
+                    Redis key ◄──────────┘       │        ▼
+                    (signal)                     │   restore lost keys
+                                                 ▼
+                                          PostgreSQL verify
+                                          expire + release
+```
+
+`npm run worker` starts it. It is a separate entrypoint from the API: no HTTP
+server, no duplicated Express lifecycle, and it scales independently.
+
+### Why an outbox
+
+PostgreSQL and Redis cannot share a transaction, so between `COMMIT` and the
+Redis write there is a window where the hold exists and the signal does not.
+That window cannot be closed - so instead of pretending, the *intent to publish*
+is written into the hold's own transaction:
+
+```
+BEGIN
+  validate event and user
+  lock seats FOR UPDATE
+  reclaim lapsed holds
+  create hold, hold-seat rows, mark seats held
+  insert hold_expiration_outbox row      <-- same transaction
+COMMIT
+```
+
+Hold and event commit together or not at all. If Redis is down for an hour, the
+row waits. **The API never calls Redis** on this path: a reservation the
+database accepted cannot fail because a cache is unavailable, and Redis latency
+never lands in the customer's response.
+
+### Delivery is at-least-once
+
+Not exactly-once, and it cannot be: a worker can set the Redis key and die
+before recording that it did, after which the row is claimed again. This is safe
+because `SET` is idempotent and so is the expiry transition it leads to. Nothing
+here should be read as a claim of exactly-once processing.
+
+### Three loops
+
+| Loop | Cadence | Job |
+| ---- | ------- | --- |
+| publish | 1s | claim outbox rows, write Redis keys, mark processed |
+| sweep | 1s | find holds past `expires_at` in **PostgreSQL**, expire them |
+| reconcile | 30s | restore Redis keys that active holds should have |
+
+They are separate because they fail independently. Redis being down stops
+publishing and reconciliation, but the sweep needs only PostgreSQL - so an
+outage delays the *signal*, never the expiry.
+
+**The sweep is the authoritative path, and it does not read Redis.** An expired
+Redis key is not a durable message: it can be evicted, lost to a flush, or
+missed when no listener is connected. Keyspace notifications are not used at
+all; correctness rests on an indexed PostgreSQL query.
+
+### Claiming work: `FOR UPDATE SKIP LOCKED`
+
+```sql
+SELECT ... FROM hold_expiration_outbox
+WHERE processed_at IS NULL AND available_at <= now()
+ORDER BY available_at LIMIT $1
+FOR UPDATE SKIP LOCKED
+```
+
+A plain `FOR UPDATE` would make worker B queue behind worker A on the same row,
+so two workers would be no faster than one. `SKIP LOCKED` hands B what A has not
+taken, which is what makes the worker horizontally scalable.
+
+This is deliberately **the opposite of the customer seat path**, which uses a
+plain `FOR UPDATE` and waits. Skipping a locked seat would mean silently
+ignoring a seat someone asked for; skipping a locked outbox row just means
+another worker already has it.
+
+### Lock order
+
+Both the worker and the reservation path take **seats first, in ascending id
+order, then the hold**. Matching that order is what prevents a deadlock: two
+transactions taking the same two locks in opposite orders will cycle, and
+PostgreSQL will kill one. The worker naturally starts from a hold, so getting
+this backwards would be the easy mistake - it explicitly loads the hold's seat
+ids, locks those, and only then locks the hold.
+
+The sweep's candidate query takes **no** lock, for the same reason: locking
+holds there would take them before the seats.
+
+### Redis TTL comes from PostgreSQL
+
+```
+ttl = ceil(expires_at - now())     -- both evaluated inside PostgreSQL
+```
+
+The application's wall clock never participates. A worker running fast would
+otherwise set keys that lapse early; one running slow would set keys outliving
+the hold. Key shape is `tiqx:v1:hold-expiry:<holdId>`, value is the hold id -
+nothing sensitive, and readable in `redis-cli`.
+
+### Retries
+
+A failed publish does not mark the row processed. It increments `attempts`,
+records the driver's message (never a URL, which can carry a password), and
+pushes `available_at` forward by an exponential, capped backoff computed **by
+PostgreSQL** - so a skewed worker clock cannot schedule a retry in the past and
+spin on it. One polling loop, not thousands of timers.
+
+### Self-healing
+
+Reconciliation scans active holds expiring within a window and restores any
+missing Redis key. It covers what the outbox cannot: a key lost *after*
+publication, to a flush, an eviction, a restart without persistence, or a
+failover to an empty replica.
+
+Note what it is **not** needed for: if reconciliation never ran, every hold
+would still expire on time, because the sweep reads PostgreSQL. It keeps the
+Redis view honest; it does not keep the system correct.
+
+### Invariants
+
+1. A seat cannot become available while a valid active hold owns it.
+2. A valid hold cannot disappear because Redis is unavailable.
+3. Missing Redis signals are recoverable - by reconciliation, and irrelevant to
+   the sweep in any case.
+4. Duplicate signals are harmless; expiry is idempotent under concurrency.
+5. Worker crashes lose no work: all progress is in PostgreSQL, and a killed
+   process's locks are released by the database.
+6. PostgreSQL is authoritative. **Redis is not the source of truth for seat
+   ownership** - there is no seat key, no distributed seat lock, and deleting
+   every expiration key changes no seat's availability.
+
+### Future metrics
+
+There is no metrics backend in this project, and one was not introduced for this
+feature. The worker keeps in-process counters and logs a periodic summary
+(pending outbox depth, published, publish failures, expired, no-ops, restored
+keys, loop errors). Worth exporting when a backend exists: outbox depth and
+oldest pending age (queue health), publish failure rate (Redis health),
+expiry lag between `expires_at` and the actual transition (customer-visible
+correctness), and reconciliation restores per hour (a non-zero rate means Redis
+is losing keys).
+
 
 
 Design rules applied throughout:

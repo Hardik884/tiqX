@@ -255,3 +255,33 @@ export async function markSeatsHeld(
   );
   return result.rowCount ?? 0;
 }
+
+/**
+ * Queues the expiration event for a freshly created hold.
+ *
+ * Called inside the hold's own transaction, which is the entire point: the
+ * hold, its seat links, the seat status changes and the intent to publish all
+ * commit together. If the transaction rolls back, no orphan event is left
+ * describing a hold that never existed; if it commits, the event is durable
+ * even if Redis is unreachable for the next hour.
+ *
+ * `expires_at` is read back from the hold row rather than recomputed, so the
+ * outbox carries the same authoritative instant PostgreSQL generated. The
+ * application clock never enters this calculation.
+ *
+ * ON CONFLICT DO NOTHING makes a retry harmless: one event per hold, enforced
+ * by the unique constraint rather than by the caller remembering.
+ */
+export async function enqueueHoldExpiration(
+  db: Queryable,
+  holdId: string,
+): Promise<void> {
+  await db.query(
+    `INSERT INTO hold_expiration_outbox (hold_id, expires_at)
+     SELECT h.id, h.expires_at
+     FROM reservation_holds h
+     WHERE h.id = $1
+     ON CONFLICT (hold_id) DO NOTHING`,
+    [holdId],
+  );
+}

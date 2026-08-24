@@ -4,6 +4,7 @@ import { withTransaction } from '../../db/pool.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/app-error.js';
 import type { CreateHoldInput, CreateHoldResult, UnavailableSeat } from './reservation-hold.types.js';
 import {
+  enqueueHoldExpiration,
   eventExists,
   expireLapsedHoldsForSeats,
   findExistingSeatIds,
@@ -54,6 +55,7 @@ function describeUnavailable(seats: readonly UnavailableSeat[]): string {
  *     insert the hold with a database-computed expires_at
  *     insert the hold/seat links
  *     flip the seats to held
+ *     queue the expiration event in the outbox
  *   COMMIT
  *
  * Atomicity is not something this function implements - it is what the
@@ -134,6 +136,13 @@ export async function createHoldInTransaction(
   if (heldCount !== showSeatIds.length) {
     throw new Error(`Expected to hold ${showSeatIds.length} seats, updated ${heldCount}`);
   }
+
+  // Durable intent to publish the Redis expiration signal, committed with
+  // everything above. Nothing here talks to Redis: the customer's request is
+  // answered on PostgreSQL alone, so a Redis outage cannot fail a reservation
+  // the database already accepted, and cannot add its latency to the response
+  // either. The worker publishes afterwards.
+  await enqueueHoldExpiration(client, hold.id);
 
   return {
     holdId: hold.id,
