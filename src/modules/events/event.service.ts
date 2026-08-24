@@ -4,6 +4,7 @@ import { PG_ERROR, pgErrorCode, pgErrorConstraint } from '../../db/pg-error.js';
 import { pool, withTransaction } from '../../db/pool.js';
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { logger } from '../../utils/logger.js';
+import { countBookingsForEvent, getEventBookingSummary, listBookingsForEvent } from '../bookings/booking.repository.js';
 import { createShowSeatsForEvent, findPublicSeatMap } from '../seats/show-seat.repository.js';
 import { listVenueSeatIds, venueExists } from '../venues/venue.repository.js';
 import { encodeEventCursor } from './event.schema.js';
@@ -11,8 +12,11 @@ import {
   countAvailableSeats,
   countEventsForListing,
   deleteEventRow,
+  findEventOwnerId,
   findEventWithVenue,
   findPublicEventsPage,
+  getOrganiserDashboardTotals,
+  getSeatInventorySummary,
   getSeatSummaryForEvent,
   getSeatSummaryForEvents,
   hasEventHistory,
@@ -28,12 +32,18 @@ import {
 import type {
   CreateEventInput,
   DeleteEventInput,
+  EventBookingSummaryView,
   EventCursor,
   EventRecord,
+  EventSummaryInput,
+  ListEventBookingsInput,
+  ListEventBookingsResult,
   ListOrganiserEventsInput,
   ListOrganiserEventsResult,
   ListPublicEventsInput,
   ListPublicEventsResult,
+  OrganiserDashboardInput,
+  OrganiserDashboardTotals,
   PrivateEventView,
   PublicEventView,
   PublicSeatMapEntry,
@@ -627,4 +637,70 @@ export async function getPublicSeatMap(
 ): Promise<PublicSeatMapEntry[]> {
   await getEventById(eventId, requester);
   return findPublicSeatMap(pool, eventId);
+}
+
+/**
+ * The organiser dashboard's headline numbers - upcoming events, bookings,
+ * seats sold, seats available, revenue - aggregated in PostgreSQL, never
+ * computed client-side from a page of events. Same `all`-scoping rule as
+ * `listOrganiserEvents`: an organiser always sees their own totals; only an
+ * admin passing `all: true` sees every organiser's.
+ */
+export async function getOrganiserDashboard(input: OrganiserDashboardInput): Promise<OrganiserDashboardTotals> {
+  const scopeToAdmin = input.all && input.userRole === 'admin';
+  const organiserId = scopeToAdmin ? null : input.userId;
+  return getOrganiserDashboardTotals(pool, organiserId);
+}
+
+/**
+ * Read-only ownership check for the summary/bookings views below: does this
+ * caller own this event, or are they an admin? No row lock - nothing here is
+ * about to change the event - so this deliberately does not reuse
+ * `lockEventForOwnership`; see its own doc comment for why a GET must never
+ * take one. Answers "not found" for both a nonexistent and an unowned event,
+ * the same conflation `eventNotFound` documents for the mutating paths.
+ */
+async function requireEventOwnership(eventId: string, requester: RequestingUser): Promise<void> {
+  const organiserId = await findEventOwnerId(pool, eventId);
+  if (organiserId === null) {
+    throw eventNotFound();
+  }
+  if (requester.userRole !== 'admin' && organiserId !== requester.userId) {
+    throw eventNotFound();
+  }
+}
+
+/** One event's booking/seat summary for its organiser's event-detail view. */
+export async function getEventBookingSummaryForOrganiser(input: EventSummaryInput): Promise<EventBookingSummaryView> {
+  await requireEventOwnership(input.eventId, input);
+
+  const [inventory, bookingSummary, record] = await Promise.all([
+    getSeatInventorySummary(pool, input.eventId),
+    getEventBookingSummary(pool, input.eventId),
+    findEventWithVenue(pool, input.eventId),
+  ]);
+
+  return {
+    totalBookings: bookingSummary.totalBookings,
+    seatsSold: inventory.booked,
+    availableSeats: inventory.available,
+    revenue: bookingSummary.revenue,
+    currency: record?.event.currency ?? 'INR',
+  };
+}
+
+/** One page of an event's bookings for its organiser's booking-overview view. */
+export async function listEventBookingsForOrganiser(input: ListEventBookingsInput): Promise<ListEventBookingsResult> {
+  await requireEventOwnership(input.eventId, input);
+
+  const total = await countBookingsForEvent(pool, input.eventId);
+  const bookings = await listBookingsForEvent(pool, input.eventId, { page: input.page, limit: input.limit });
+
+  return {
+    bookings,
+    page: input.page,
+    limit: input.limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / input.limit)),
+  };
 }

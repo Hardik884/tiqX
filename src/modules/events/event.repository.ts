@@ -112,6 +112,40 @@ export async function countAvailableSeats(db: Queryable, eventId: string): Promi
   return Number(result.rows[0]!.count);
 }
 
+/**
+ * Just the organiser id of an event, unlocked - for a read-only "does this
+ * caller own this event?" check (the organiser dashboard's summary/bookings
+ * views) that has no business taking `lockEventForOwnership`'s row lock,
+ * since nothing there is about to change the row.
+ */
+export async function findEventOwnerId(db: Queryable, eventId: string): Promise<string | null> {
+  const result = await db.query<{ organiser_id: string }>('SELECT organiser_id FROM events WHERE id = $1', [
+    eventId,
+  ]);
+  return result.rows[0]?.organiser_id ?? null;
+}
+
+export interface SeatInventorySummary {
+  available: number;
+  held: number;
+  booked: number;
+}
+
+/** Seat counts by status for one event - the dashboard's "seats sold"/"available seats" numbers, computed by PostgreSQL. */
+export async function getSeatInventorySummary(db: Queryable, eventId: string): Promise<SeatInventorySummary> {
+  const result = await db.query<{ available: string; held: string; booked: string }>(
+    `SELECT
+       count(*) FILTER (WHERE status = 'available')::text AS available,
+       count(*) FILTER (WHERE status = 'held')::text AS held,
+       count(*) FILTER (WHERE status = 'booked')::text AS booked
+     FROM show_seats
+     WHERE event_id = $1`,
+    [eventId],
+  );
+  const row = result.rows[0]!;
+  return { available: Number(row.available), held: Number(row.held), booked: Number(row.booked) };
+}
+
 export interface SeatSummary {
   availableSeats: number;
   /** The lowest price among currently available seats, or null if none are available. */
@@ -277,6 +311,74 @@ export async function hasEventHistory(db: Queryable, eventId: string): Promise<b
 export async function deleteEventRow(db: Queryable, eventId: string): Promise<boolean> {
   const result = await db.query('DELETE FROM events WHERE id = $1', [eventId]);
   return (result.rowCount ?? 0) > 0;
+}
+
+export interface OrganiserDashboardTotals {
+  upcomingEvents: number;
+  totalBookings: number;
+  seatsSold: number;
+  availableSeats: number;
+  revenue: string;
+}
+
+/**
+ * The organiser dashboard's headline numbers, aggregated across every event
+ * the caller owns (or, for an admin with `all=true`, every event) in three
+ * indexed queries - never a page of events fetched and summed in JavaScript.
+ *
+ * Revenue is summed across whatever currencies those events happen to use;
+ * this system has no multi-currency conversion anywhere, so the figure is
+ * only meaningful when an organiser's events share one currency, same as
+ * every other unconverted total in this codebase.
+ */
+export async function getOrganiserDashboardTotals(
+  db: Queryable,
+  organiserId: string | null,
+): Promise<OrganiserDashboardTotals> {
+  const scoped = organiserId !== null;
+  const params = scoped ? [organiserId] : [];
+
+  const upcomingResult = await db.query<{ count: string }>(
+    scoped
+      ? `SELECT count(*)::text AS count FROM events WHERE organiser_id = $1 AND status = 'published' AND starts_at > now()`
+      : `SELECT count(*)::text AS count FROM events WHERE status = 'published' AND starts_at > now()`,
+    params,
+  );
+
+  const bookingResult = await db.query<{ total_bookings: string; revenue: string }>(
+    scoped
+      ? `SELECT count(*)::text AS total_bookings, COALESCE(SUM(b.total_amount), 0)::text AS revenue
+         FROM bookings b
+         JOIN events e ON e.id = b.event_id
+         WHERE e.organiser_id = $1 AND b.status = 'confirmed'`
+      : `SELECT count(*)::text AS total_bookings, COALESCE(SUM(total_amount), 0)::text AS revenue
+         FROM bookings
+         WHERE status = 'confirmed'`,
+    params,
+  );
+
+  const seatResult = await db.query<{ available: string; booked: string }>(
+    scoped
+      ? `SELECT
+           count(*) FILTER (WHERE ss.status = 'available')::text AS available,
+           count(*) FILTER (WHERE ss.status = 'booked')::text AS booked
+         FROM show_seats ss
+         JOIN events e ON e.id = ss.event_id
+         WHERE e.organiser_id = $1`
+      : `SELECT
+           count(*) FILTER (WHERE status = 'available')::text AS available,
+           count(*) FILTER (WHERE status = 'booked')::text AS booked
+         FROM show_seats`,
+    params,
+  );
+
+  return {
+    upcomingEvents: Number(upcomingResult.rows[0]!.count),
+    totalBookings: Number(bookingResult.rows[0]!.total_bookings),
+    revenue: bookingResult.rows[0]!.revenue,
+    availableSeats: Number(seatResult.rows[0]!.available),
+    seatsSold: Number(seatResult.rows[0]!.booked),
+  };
 }
 
 export interface ListEventsPage {

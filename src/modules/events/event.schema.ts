@@ -104,6 +104,17 @@ export const organiserEventListQuerySchema = z.object({
   all: booleanFromQuery.default(false),
 });
 
+/** GET /api/v1/organiser/dashboard - same `all` escape hatch, no pagination. */
+export const organiserDashboardQuerySchema = z.object({
+  all: booleanFromQuery.default(false),
+});
+
+/** GET /api/v1/organiser/events/:eventId/bookings */
+export const eventBookingListQuerySchema = z.object({
+  page: z.coerce.number().int().min(MIN_PAGE).default(1),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(DEFAULT_PAGE_LIMIT),
+});
+
 // ---------------------------------------------------------------------------
 // Public discovery: GET /api/v1/events
 // ---------------------------------------------------------------------------

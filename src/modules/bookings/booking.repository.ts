@@ -138,6 +138,98 @@ export async function applyBookingTotal(db: Queryable, bookingId: string): Promi
   return row.total_amount;
 }
 
+export interface EventBookingSummary {
+  totalBookings: number;
+  revenue: string;
+}
+
+/**
+ * How many confirmed bookings an event has and how much they total - the
+ * organiser dashboard's "total bookings"/"revenue" numbers, computed by
+ * PostgreSQL. Cancelled bookings count toward neither: a cancellation is not
+ * revenue, and `getSeatInventorySummary`'s "seats sold" already reflects the
+ * seats a cancellation released, so this stays consistent with that number
+ * rather than a raw count of every booking ever made.
+ */
+export async function getEventBookingSummary(db: Queryable, eventId: string): Promise<EventBookingSummary> {
+  const result = await db.query<{ total_bookings: string; revenue: string }>(
+    `SELECT count(*)::text AS total_bookings, COALESCE(SUM(total_amount), 0)::text AS revenue
+     FROM bookings
+     WHERE event_id = $1 AND status = 'confirmed'`,
+    [eventId],
+  );
+  const row = result.rows[0]!;
+  return { totalBookings: Number(row.total_bookings), revenue: row.revenue };
+}
+
+export interface BookingListRow {
+  id: string;
+  bookingReference: string;
+  status: BookingStatus;
+  totalAmount: string;
+  currency: string;
+  seatCount: number;
+  customerName: string;
+  customerEmail: string;
+  createdAt: Date;
+}
+
+/** Total bookings for one event - the denominator for the organiser's booking-overview pagination. */
+export async function countBookingsForEvent(db: Queryable, eventId: string): Promise<number> {
+  const result = await db.query<{ count: string }>('SELECT count(*)::text AS count FROM bookings WHERE event_id = $1', [
+    eventId,
+  ]);
+  return Number(result.rows[0]!.count);
+}
+
+/**
+ * One page of an event's bookings, newest first, with the customer identity
+ * and seat count an organiser's booking-overview screen needs - joined in
+ * PostgreSQL rather than fetched per row.
+ */
+export async function listBookingsForEvent(
+  db: Queryable,
+  eventId: string,
+  { page, limit }: { page: number; limit: number },
+): Promise<BookingListRow[]> {
+  const offset = (page - 1) * limit;
+
+  const result = await db.query<{
+    id: string;
+    booking_reference: string;
+    status: BookingStatus;
+    total_amount: string;
+    currency: string;
+    seat_count: string;
+    customer_name: string;
+    customer_email: string;
+    created_at: Date;
+  }>(
+    `SELECT
+       b.id, b.booking_reference, b.status, b.total_amount, b.currency, b.created_at,
+       u.name AS customer_name, u.email AS customer_email,
+       (SELECT count(*) FROM booking_seats bs WHERE bs.booking_id = b.id)::text AS seat_count
+     FROM bookings b
+     JOIN users u ON u.id = b.user_id
+     WHERE b.event_id = $1
+     ORDER BY b.created_at DESC, b.id DESC
+     LIMIT $2 OFFSET $3`,
+    [eventId, limit, offset],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    bookingReference: row.booking_reference,
+    status: row.status,
+    totalAmount: row.total_amount,
+    currency: row.currency,
+    seatCount: Number(row.seat_count),
+    customerName: row.customer_name,
+    customerEmail: row.customer_email,
+    createdAt: row.created_at,
+  }));
+}
+
 /** Marks the locked, verified seats sold. Returns how many actually changed. */
 export async function markSeatsBooked(
   db: Queryable,

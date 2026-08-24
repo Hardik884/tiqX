@@ -191,6 +191,57 @@ export interface ListPublicEventsResult {
   };
 }
 
+export interface OrganiserDashboardInput extends RequestingUser {
+  /** Admin-only: aggregate across every organiser's events rather than just the caller's own. */
+  all: boolean;
+}
+
+export interface OrganiserDashboardTotals {
+  upcomingEvents: number;
+  totalBookings: number;
+  seatsSold: number;
+  availableSeats: number;
+  revenue: string;
+}
+
+export interface EventSummaryInput extends RequestingUser {
+  eventId: string;
+}
+
+export interface EventBookingSummaryView {
+  totalBookings: number;
+  seatsSold: number;
+  availableSeats: number;
+  revenue: string;
+  currency: string;
+}
+
+export interface ListEventBookingsInput extends RequestingUser {
+  eventId: string;
+  page: number;
+  limit: number;
+}
+
+export interface EventBookingListItem {
+  id: string;
+  bookingReference: string;
+  status: string;
+  totalAmount: string;
+  currency: string;
+  seatCount: number;
+  customerName: string;
+  customerEmail: string;
+  createdAt: Date;
+}
+
+export interface ListEventBookingsResult {
+  bookings: EventBookingListItem[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
 /** One row of the public seat map - see event.service.ts::getPublicSeatMap. */
 export interface PublicSeatMapEntry {
   id: string;

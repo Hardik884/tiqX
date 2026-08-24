@@ -9,8 +9,11 @@ import { waitlistRouter } from '../waitlist/waitlist.routes.js';
 import {
   createEventHandler,
   deleteEventHandler,
+  getEventBookingSummaryHandler,
   getEventHandler,
+  getOrganiserDashboardHandler,
   getPublicSeatMapHandler,
+  listEventBookingsHandler,
   listOrganiserEventsHandler,
   listPublicEventsHandler,
   publishEventHandler,
@@ -80,3 +83,32 @@ organiserEventsRouter.get(
   requireRole('organiser', 'admin'),
   listOrganiserEventsHandler,
 );
+
+// GET /api/v1/organiser/events/:eventId/summary - one event's booking/seat
+// totals for the organiser's event-detail view. Ownership is checked inside
+// the service, the same "not found" answer for someone else's event as every
+// other organiser-scoped route - see event.service.ts::requireEventOwnership.
+organiserEventsRouter.get(
+  '/:eventId/summary',
+  requireAuth,
+  requireRole('organiser', 'admin'),
+  getEventBookingSummaryHandler,
+);
+
+// GET /api/v1/organiser/events/:eventId/bookings - the organiser's
+// booking-overview view for one event.
+organiserEventsRouter.get(
+  '/:eventId/bookings',
+  requireAuth,
+  requireRole('organiser', 'admin'),
+  listEventBookingsHandler,
+);
+
+/**
+ * Mounted at /api/v1/organiser/dashboard, sibling to organiserEventsRouter
+ * for the same reason that one is not nested under /events: these are
+ * aggregate totals across every event the caller owns, not one event by id.
+ */
+export const organiserDashboardRouter = Router();
+
+organiserDashboardRouter.get('/', requireAuth, requireRole('organiser', 'admin'), getOrganiserDashboardHandler);

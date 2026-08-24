@@ -2,9 +2,10 @@ import { Router } from 'express';
 
 import { authRouter } from '../modules/auth/auth.routes.js';
 import { bookingRouter } from '../modules/bookings/booking.routes.js';
-import { eventRouter, organiserEventsRouter } from '../modules/events/event.routes.js';
+import { eventRouter, organiserDashboardRouter, organiserEventsRouter } from '../modules/events/event.routes.js';
 import { healthRouter } from '../modules/health/health.routes.js';
 import { ticketRouter } from '../modules/tickets/ticket.routes.js';
+import { venueRouter } from '../modules/venues/venue.routes.js';
 import { waitlistOfferRouter } from '../modules/waitlist/waitlist-offer.routes.js';
 
 const v1Router = Router();
@@ -12,8 +13,10 @@ const v1Router = Router();
 v1Router.use('/auth', authRouter);
 v1Router.use('/events', eventRouter);
 v1Router.use('/organiser/events', organiserEventsRouter);
+v1Router.use('/organiser/dashboard', organiserDashboardRouter);
 v1Router.use('/bookings', bookingRouter);
 v1Router.use('/tickets', ticketRouter);
+v1Router.use('/venues', venueRouter);
 v1Router.use('/waitlist/offers', waitlistOfferRouter);
 
 /**

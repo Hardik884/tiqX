@@ -4,7 +4,9 @@ import { BadRequestError } from '../../errors/app-error.js';
 import { requireUser } from '../../middleware/authenticate.js';
 import {
   createEventSchema,
+  eventBookingListQuerySchema,
   eventIdParamsSchema,
+  organiserDashboardQuerySchema,
   organiserEventListQuerySchema,
   publicEventListQuerySchema,
   updateEventSchema,
@@ -12,8 +14,11 @@ import {
 import {
   createEvent,
   deleteEvent,
+  getEventBookingSummaryForOrganiser,
   getEventById,
+  getOrganiserDashboard,
   getPublicSeatMap,
+  listEventBookingsForOrganiser,
   listOrganiserEvents,
   listPublicEvents,
   publishEvent,
@@ -169,6 +174,51 @@ export async function listOrganiserEventsHandler(req: Request, res: Response): P
     page: parsedQuery.data.page,
     limit: parsedQuery.data.limit,
     all: parsedQuery.data.all,
+  });
+
+  res.status(200).json(result);
+}
+
+/** GET /api/v1/organiser/dashboard - the organiser dashboard's headline numbers. */
+export async function getOrganiserDashboardHandler(req: Request, res: Response): Promise<void> {
+  const parsedQuery = organiserDashboardQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    throw new BadRequestError('Invalid query parameters', toFieldErrors(parsedQuery.error.issues));
+  }
+
+  const { id: userId, role: userRole } = requireUser(req);
+
+  const totals = await getOrganiserDashboard({ userId, userRole, all: parsedQuery.data.all });
+
+  res.status(200).json(totals);
+}
+
+/** GET /api/v1/organiser/events/:eventId/summary */
+export async function getEventBookingSummaryHandler(req: Request, res: Response): Promise<void> {
+  const eventId = parseEventId(req);
+  const { id: userId, role: userRole } = requireUser(req);
+
+  const summary = await getEventBookingSummaryForOrganiser({ eventId, userId, userRole });
+
+  res.status(200).json(summary);
+}
+
+/** GET /api/v1/organiser/events/:eventId/bookings */
+export async function listEventBookingsHandler(req: Request, res: Response): Promise<void> {
+  const eventId = parseEventId(req);
+  const parsedQuery = eventBookingListQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    throw new BadRequestError('Invalid query parameters', toFieldErrors(parsedQuery.error.issues));
+  }
+
+  const { id: userId, role: userRole } = requireUser(req);
+
+  const result = await listEventBookingsForOrganiser({
+    eventId,
+    userId,
+    userRole,
+    page: parsedQuery.data.page,
+    limit: parsedQuery.data.limit,
   });
 
   res.status(200).json(result);
