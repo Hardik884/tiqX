@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 
 import { config } from '../../config/index.js';
 import { withTransaction } from '../../db/pool.js';
+import { ConflictError, NotFoundError } from '../../errors/app-error.js';
 import { getRedis } from '../../redis/client.js';
 import { holdExpiryKey } from '../../redis/keys.js';
 import { logger } from '../../utils/logger.js';
@@ -16,6 +17,7 @@ import {
   findHoldSeatIds,
   lockHold,
   lockSeats,
+  markHoldCancelled,
   markHoldExpired,
   markOutboxProcessed,
   recordOutboxFailure,
@@ -225,6 +227,109 @@ export async function expireHoldInTransaction(
 
 export async function expireHold(holdId: string): Promise<'expired' | 'noop'> {
   return withTransaction((client) => expireHoldInTransaction(client, holdId));
+}
+
+/** A hold that does not exist, is not this caller's, or belongs to a different event. */
+function holdNotFound(): NotFoundError {
+  return new NotFoundError('Hold not found', { reason: 'HOLD_NOT_FOUND' });
+}
+
+export interface CancelHoldInput {
+  eventId: string;
+  holdId: string;
+  /** Always the authenticated principal; never a value from the request body. */
+  userId: string;
+}
+
+/**
+ * Voluntarily releases the caller's own still-active hold, before it is
+ * confirmed or has expired - "I changed my mind about these seats," not a
+ * cleanup path. Everything below is `expireHoldInTransaction` with two
+ * differences: the transition lands on `cancelled` instead of `expired` (see
+ * `markHoldCancelled`), and there is an ownership check first, because unlike
+ * the sweep - which acts on any due hold with no caller to speak of - this is
+ * reached from a customer's own request and must not let them touch a hold
+ * that is not theirs.
+ *
+ * LOCK ORDER: seats first, ascending id, then the hold - identical to every
+ * other path that touches `reservation_holds`, for the same deadlock-avoidance
+ * reason documented there.
+ *
+ * The waitlist bookkeeping at the end exists for the same reason it does in
+ * `expireHoldInTransaction`: a hold backing a live offer that goes away for
+ * any reason - time running out, or its holder giving it up early - ends that
+ * offer. In practice a customer's own browse-and-hold flow never reaches a
+ * waitlist-offer hold (offers are created by the allocation worker, not by
+ * `POST /events/:eventId/holds`), so this branch is normally a no-op; it is
+ * kept so the invariant "an offer never outlives its backing hold" holds
+ * regardless of why the hold ended.
+ */
+export async function cancelHoldInTransaction(
+  client: PoolClient,
+  input: CancelHoldInput,
+): Promise<{ releasedSeatCount: number }> {
+  const seatIds = await findHoldSeatIds(client, input.holdId);
+
+  // Seats first, ascending - matching the reservation and expiry paths.
+  await lockSeats(client, seatIds);
+
+  const hold = await lockHold(client, input.holdId);
+
+  if (hold === null || hold.userId !== input.userId || hold.eventId !== input.eventId) {
+    // Not found, not owned, or under the wrong event all answer identically -
+    // the same conflation `confirmHoldInTransaction` documents for its own
+    // ownership check, and for the same reason: a caller has no legitimate
+    // way to tell these apart, and letting them try turns the endpoint into
+    // an oracle for which hold ids exist.
+    throw holdNotFound();
+  }
+
+  if (hold.status !== 'active') {
+    throw new ConflictError('This hold is no longer active', { reason: 'HOLD_NOT_ACTIVE' });
+  }
+
+  const changed = await markHoldCancelled(client, input.holdId);
+  if (!changed) {
+    // Unreachable under the lock just taken above, unless something else in
+    // this same transaction already moved the hold - kept as a hard failure
+    // rather than a silent success either way.
+    throw new ConflictError('This hold is no longer active', { reason: 'HOLD_NOT_ACTIVE' });
+  }
+
+  const released = await releaseSeatsWithoutLiveHold(client, seatIds);
+
+  logger.info('Cancelled hold and released seats', {
+    holdId: input.holdId,
+    userId: input.userId,
+    seats: seatIds.length,
+    released: released.length,
+  });
+
+  await enqueueWaitlistAllocationForSeats(client, released);
+
+  const expiredOffer = await markOfferExpiredByHoldId(client, input.holdId);
+  if (expiredOffer !== null) {
+    if (!(await markEntryExpired(client, expiredOffer.waitlistEntryId))) {
+      throw new Error('Waitlist entry was no longer offered when its offer was cancelled');
+    }
+
+    const payload: WaitlistOfferNotificationPayload = {
+      v: 1,
+      offerId: expiredOffer.id,
+      waitlistEntryId: expiredOffer.waitlistEntryId,
+      userId: hold.userId,
+      eventId: hold.eventId,
+      showSeatId: expiredOffer.showSeatId,
+      expiresAt: expiredOffer.expiresAt.toISOString(),
+    };
+    await enqueueOfferNotification(client, expiredOffer.id, 'WAITLIST_OFFER_EXPIRED', payload);
+  }
+
+  return { releasedSeatCount: released.length };
+}
+
+export async function cancelHold(input: CancelHoldInput): Promise<{ releasedSeatCount: number }> {
+  return withTransaction((client) => cancelHoldInTransaction(client, input));
 }
 
 /**

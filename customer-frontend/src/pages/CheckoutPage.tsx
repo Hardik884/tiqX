@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { confirmHold } from '../api/bookings';
+import { confirmHold, releaseHold } from '../api/bookings';
 import { ApiError, newIdempotencyKey } from '../api/client';
 import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
@@ -14,6 +14,7 @@ export function CheckoutPage() {
 
   const [expired, setExpired] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [releasing, setReleasing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Stable for the lifetime of this hold: a retried click after a network
   // failure replays the same confirmation instead of risking a second booking.
@@ -51,6 +52,27 @@ export function CheckoutPage() {
       }
     } finally {
       setConfirming(false);
+    }
+  }
+
+  /**
+   * Best-effort: the hold is released either way from the customer's point of
+   * view (they're leaving checkout), so a failure here - the hold already
+   * expired, a flaky network - must not trap them on this page. It only
+   * changes how promptly the seats reappear as available to everyone else;
+   * worst case, the existing TTL still releases them on its own.
+   */
+  async function handleRelease() {
+    if (hold === null) return;
+    setReleasing(true);
+    try {
+      await releaseHold(hold.eventId, hold.holdId);
+    } catch {
+      // Nothing actionable for the customer - see the doc comment above.
+    } finally {
+      setReleasing(false);
+      clearHold();
+      navigate(`/events/${hold.eventId}`);
     }
   }
 
@@ -110,13 +132,7 @@ export function CheckoutPage() {
           <Button onClick={handleConfirm} loading={confirming} className="w-full">
             Confirm booking
           </Button>
-          <Button
-            variant="ghost"
-            onClick={() => {
-              clearHold();
-              navigate(`/events/${hold.eventId}`);
-            }}
-          >
+          <Button variant="ghost" onClick={handleRelease} loading={releasing}>
             Cancel and release seats
           </Button>
         </div>

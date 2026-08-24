@@ -5,7 +5,8 @@ import { requireUser } from '../../middleware/authenticate.js';
 import { hashHoldRequest } from '../idempotency/idempotency.hash.js';
 import { IDEMPOTENCY_HEADER, idempotencyKeySchema } from '../idempotency/idempotency.schema.js';
 import { runIdempotently } from '../idempotency/idempotency.service.js';
-import { createHoldSchema, holdParamsSchema } from './reservation.schema.js';
+import { cancelHold } from '../expiration/expiration.service.js';
+import { createHoldSchema, holdParamsSchema, releaseHoldParamsSchema } from './reservation.schema.js';
 import { createHoldInTransaction } from './reservation.service.js';
 
 interface FieldError {
@@ -117,4 +118,33 @@ export async function createHoldHandler(req: Request, res: Response): Promise<vo
   );
 
   res.status(outcome.statusCode).json(outcome.body);
+}
+
+/**
+ * HTTP concerns only. No Idempotency-Key: releasing is naturally idempotent
+ * through its own guarded state transition, the same reasoning
+ * `leaveWaitlistHandler` documents for the same shape of endpoint - a second
+ * call finds the hold already `cancelled` (or since converted/expired) and
+ * answers with the same 409 an outright reuse would.
+ */
+export async function releaseHoldHandler(req: Request, res: Response): Promise<void> {
+  const params = releaseHoldParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    throw new BadRequestError('Invalid event or hold id', toFieldErrors(params.error.issues));
+  }
+
+  const { id: userId } = requireUser(req);
+
+  const result = await cancelHold({
+    eventId: params.data.eventId,
+    holdId: params.data.holdId,
+    userId,
+  });
+
+  res.status(200).json({
+    holdId: params.data.holdId,
+    eventId: params.data.eventId,
+    status: 'cancelled',
+    releasedSeatCount: result.releasedSeatCount,
+  });
 }

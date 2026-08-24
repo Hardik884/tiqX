@@ -213,6 +213,22 @@ export async function markHoldExpired(db: Queryable, holdId: string): Promise<bo
 }
 
 /**
+ * Transitions a locked, verified hold to cancelled - the voluntary
+ * counterpart to `markHoldExpired`. Same guard, same shape: a hold that has
+ * already left `active` (expired, converted, or already cancelled) matches
+ * zero rows, which the caller treats as a refusal rather than a success.
+ */
+export async function markHoldCancelled(db: Queryable, holdId: string): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE reservation_holds
+     SET status = 'cancelled'
+     WHERE id = $1 AND status = 'active'`,
+    [holdId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
  * Active holds expiring soon, for reconciliation.
  *
  * Bounded by a window and a batch size, and served by the same partial index as

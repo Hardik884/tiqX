@@ -32,6 +32,14 @@ export function confirmHold(
   });
 }
 
+/** Voluntarily gives up a still-active hold so its seats go back to available immediately. */
+export function releaseHold(
+  eventId: string,
+  holdId: string,
+): Promise<{ holdId: string; eventId: string; status: string; releasedSeatCount: number }> {
+  return apiRequest(`/api/v1/events/${eventId}/holds/${holdId}/release`, { method: 'POST' });
+}
+
 export function cancelBooking(bookingId: string, idempotencyKey: string): Promise<CancellationResponse> {
   return apiRequest<CancellationResponse>(`/api/v1/bookings/${bookingId}/cancel`, {
     method: 'POST',

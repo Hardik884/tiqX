@@ -16,6 +16,12 @@ export const holdParamsSchema = z.object({
   eventId: z.uuid(),
 });
 
+/** POST /api/v1/events/:eventId/holds/:holdId/release */
+export const releaseHoldParamsSchema = z.object({
+  eventId: z.uuid(),
+  holdId: z.uuid(),
+});
+
 /**
  * Note what is absent: `userId`.
  *
