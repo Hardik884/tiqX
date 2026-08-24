@@ -8,9 +8,11 @@ import type { PublicEventView, SeatCategory, SeatMapEntry } from '../api/types';
 import { Button } from '../components/Button';
 import { ErrorState, InlineNote, Spinner } from '../components/Feedback';
 import { SeatMap } from '../components/SeatMap';
+import { CalendarIcon, ClockIcon, MapPinIcon, SofaIcon } from '../components/icons';
 import { useSeatMap } from '../lib/useSeatMap';
 import { useAuthStore } from '../store/auth';
 import { useBookingFlow } from '../store/bookingFlow';
+import { CONTAINER, categoryLabel, categoryStyle, formatMoney } from '../lib/ui';
 
 const MAX_SEATS = 10;
 
@@ -61,6 +63,7 @@ export function EventDetailPage() {
 
   const selectedSeats = seats.filter((s) => selected.has(s.id));
   const total = selectedSeats.reduce((sum, s) => sum + Number(s.price), 0);
+  const soldOut = seats.length > 0 && seats.every((s) => s.status !== 'available');
 
   async function handleReserve() {
     if (eventId === undefined || event === null || selectedSeats.length === 0) return;
@@ -109,91 +112,121 @@ export function EventDetailPage() {
   }
 
   if (eventError) {
-    return <ErrorState message={eventError} />;
+    return (
+      <div className={`${CONTAINER} py-10`}>
+        <ErrorState message={eventError} />
+      </div>
+    );
   }
   if (event === null) {
     return <Spinner label="Loading event…" />;
   }
 
+  const style = categoryStyle(event.category);
+
   return (
     <div>
-      <div className="mb-8 flex flex-wrap items-start justify-between gap-4 border-b border-neutral-200 pb-6">
-        <div>
-          <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-400">{event.category}</span>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">{event.title}</h1>
-          <p className="mt-2 text-sm text-neutral-600">{formatDateRange(event.startsAt, event.endsAt)}</p>
-          <p className="text-sm text-neutral-600">
-            {event.venue.name}
-            {event.venue.city ? `, ${event.venue.city}` : ''}
-          </p>
-          {event.description && <p className="mt-3 max-w-2xl text-sm text-neutral-500">{event.description}</p>}
+      {/* Event header */}
+      <section className={`bg-gradient-to-br ${style.band}`}>
+        <div className={`${CONTAINER} py-10 sm:py-12`}>
+          <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-white backdrop-blur-sm">
+            {categoryLabel(event.category)}
+          </span>
+          <h1 className="font-display mt-3 max-w-3xl text-2xl font-bold leading-tight text-white sm:text-3xl">{event.title}</h1>
+          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm text-white/90">
+            <span className="flex items-center gap-1.5">
+              <CalendarIcon width={16} height={16} />
+              {formatDateRange(event.startsAt, event.endsAt)}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <MapPinIcon width={16} height={16} />
+              {event.venue.name}
+              {event.venue.city ? `, ${event.venue.city}` : ''}
+            </span>
+          </div>
+          {event.description && <p className="mt-4 max-w-2xl text-sm text-white/80">{event.description}</p>}
         </div>
-        <div className="flex items-center gap-2 text-xs text-neutral-400">
-          <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-green-600' : 'bg-neutral-300'}`} />
-          {connected ? 'Live seat updates on' : 'Reconnecting…'}
+      </section>
+
+      <div className={`${CONTAINER} py-8`}>
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display flex items-center gap-2 text-lg font-bold text-ink-900">
+            <SofaIcon width={20} height={20} className="text-neutral-400" />
+            Select your seats
+          </h2>
+          <span className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-neutral-500 shadow-card">
+            <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'animate-pulse bg-emerald-500' : 'bg-neutral-300'}`} />
+            {connected ? 'Live seat availability' : 'Reconnecting…'}
+          </span>
         </div>
-      </div>
 
-      {seatsLoading ? (
-        <Spinner label="Loading seat map…" />
-      ) : seatsError ? (
-        <ErrorState message={seatsError} onRetry={refetch} />
-      ) : seats.length === 0 ? (
-        <InlineNote>No seats have been configured for this event yet.</InlineNote>
-      ) : (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
-          <SeatMap seats={seats} selected={selected} onToggle={toggleSeat} disabled={reserving} />
+        {seatsLoading ? (
+          <Spinner label="Loading seat map…" />
+        ) : seatsError ? (
+          <ErrorState message={seatsError} onRetry={refetch} />
+        ) : seats.length === 0 ? (
+          <InlineNote>No seats have been configured for this event yet.</InlineNote>
+        ) : (
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px] lg:items-start">
+            <SeatMap seats={seats} selected={selected} onToggle={toggleSeat} disabled={reserving} currency={event.currency} />
 
-          <aside className="flex flex-col gap-4 rounded border border-neutral-200 p-5">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-500">Your selection</h2>
-            {selectedSeats.length === 0 ? (
-              <p className="text-sm text-neutral-400">Select up to {MAX_SEATS} available seats.</p>
-            ) : (
-              <ul className="flex flex-col gap-1.5 text-sm">
-                {selectedSeats.map((s) => (
-                  <li key={s.id} className="flex justify-between">
-                    <span>
-                      {s.rowLabel}
-                      {s.seatNumber}
-                    </span>
-                    <span className="text-neutral-500">
-                      {event.currency} {s.price}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="flex items-center justify-between border-t border-neutral-200 pt-3 text-sm font-semibold">
-              <span>Total</span>
-              <span>
-                {event.currency} {total.toFixed(2)}
-              </span>
-            </div>
-            {reserveError && <InlineNote tone="error">{reserveError}</InlineNote>}
-            <Button onClick={handleReserve} loading={reserving} disabled={selectedSeats.length === 0}>
-              Reserve seats
-            </Button>
-
-            <div className="mt-2 border-t border-neutral-200 pt-4">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-neutral-500">Sold out? Join the waitlist</h3>
-              <div className="mt-3 flex gap-2">
-                <select
-                  value={waitlistCategory}
-                  onChange={(e) => setWaitlistCategory(e.target.value as SeatCategory)}
-                  className="flex-1 rounded border border-neutral-300 px-2 py-2 text-sm focus-ring"
-                >
-                  <option value="standard">Standard</option>
-                  <option value="premium">Premium</option>
-                </select>
-                <Button variant="secondary" onClick={handleJoinWaitlist} loading={waitlistBusy}>
-                  Join
-                </Button>
+            <aside className="flex flex-col gap-4 rounded-lg border border-neutral-200 bg-white p-5 shadow-card lg:sticky lg:top-20">
+              <h2 className="font-display text-sm font-bold uppercase tracking-wide text-neutral-500">Your selection</h2>
+              {selectedSeats.length === 0 ? (
+                <p className="text-sm text-neutral-400">Select up to {MAX_SEATS} available seats to get started.</p>
+              ) : (
+                <ul className="flex flex-col gap-2 text-sm">
+                  {selectedSeats.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between rounded-md bg-neutral-50 px-3 py-2">
+                      <span className="font-medium">
+                        Seat {s.rowLabel}
+                        {s.seatNumber}
+                      </span>
+                      <span className="text-neutral-500">{formatMoney(event.currency, s.price)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex items-center justify-between border-t border-neutral-200 pt-3">
+                <span className="text-sm text-neutral-500">
+                  {selectedSeats.length} ticket{selectedSeats.length === 1 ? '' : 's'}
+                </span>
+                <span className="text-lg font-bold text-ink-900">{formatMoney(event.currency, total)}</span>
               </div>
-              {waitlistMessage && <p className="mt-2 text-xs text-neutral-500">{waitlistMessage}</p>}
-            </div>
-          </aside>
-        </div>
-      )}
+              {reserveError && <InlineNote tone="error">{reserveError}</InlineNote>}
+              <Button onClick={handleReserve} loading={reserving} disabled={selectedSeats.length === 0} size="lg">
+                Reserve seats
+              </Button>
+
+              <div className="mt-2 border-t border-neutral-200 pt-4">
+                <h3 className="font-display text-sm font-bold uppercase tracking-wide text-neutral-500">
+                  {soldOut ? 'Sold out — join the waitlist' : 'Can\'t find your seat? Join the waitlist'}
+                </h3>
+                <p className="mt-1 text-xs text-neutral-400">We'll notify you the moment a seat in your category opens up.</p>
+                <div className="mt-3 flex gap-2">
+                  <select
+                    value={waitlistCategory}
+                    onChange={(e) => setWaitlistCategory(e.target.value as SeatCategory)}
+                    className="flex-1 rounded-md border border-neutral-300 px-2.5 py-2 text-sm focus-ring"
+                  >
+                    <option value="standard">Standard</option>
+                    <option value="premium">Premium</option>
+                  </select>
+                  <Button variant="secondary" onClick={handleJoinWaitlist} loading={waitlistBusy}>
+                    Join
+                  </Button>
+                </div>
+                {waitlistMessage && (
+                  <p className="mt-2 flex items-center gap-1.5 text-xs text-neutral-500">
+                    <ClockIcon width={13} height={13} />
+                    {waitlistMessage}
+                  </p>
+                )}
+              </div>
+            </aside>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

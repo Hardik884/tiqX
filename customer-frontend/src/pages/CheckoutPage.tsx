@@ -5,7 +5,9 @@ import { ApiError, newIdempotencyKey } from '../api/client';
 import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
 import { InlineNote } from '../components/Feedback';
+import { AlertIcon, CalendarIcon, MapPinIcon, TicketIcon } from '../components/icons';
 import { useBookingFlow } from '../store/bookingFlow';
+import { CONTAINER, formatMoney } from '../lib/ui';
 
 export function CheckoutPage() {
   const hold = useBookingFlow((s) => s.hold);
@@ -22,11 +24,13 @@ export function CheckoutPage() {
 
   if (hold === null) {
     return (
-      <div className="mx-auto max-w-md text-center">
-        <InlineNote>There's no active seat hold. Pick your seats from an event page first.</InlineNote>
-        <Link to="/" className="mt-4 inline-block text-sm font-medium underline underline-offset-2">
-          Browse events
-        </Link>
+      <div className={`${CONTAINER} py-16`}>
+        <div className="mx-auto max-w-md text-center">
+          <InlineNote>There's no active seat hold. Pick your seats from an event page first.</InlineNote>
+          <Link to="/" className="mt-4 inline-block text-sm font-semibold text-brand-600 underline underline-offset-2">
+            Browse events
+          </Link>
+        </div>
       </div>
     );
   }
@@ -77,66 +81,101 @@ export function CheckoutPage() {
   }
 
   return (
-    <div className="mx-auto max-w-lg">
-      <h1 className="text-xl font-semibold">Confirm your booking</h1>
-      <p className="mt-1 text-sm text-neutral-500">{hold.event.title}</p>
+    <div className={`${CONTAINER} py-8 sm:py-10`}>
+      <div className="mx-auto max-w-lg">
+        <h1 className="font-display text-2xl font-bold text-ink-900">Confirm your booking</h1>
+        <p className="mt-1 text-sm text-neutral-500">Review your seats before the hold expires.</p>
 
-      <div className="mt-6 rounded border border-neutral-200 p-5">
-        <div className="flex items-center justify-between border-b border-neutral-200 pb-3">
-          <span className="text-sm text-neutral-500">Hold expires in</span>
+        {/* Hold expiration warning banner */}
+        <div
+          className={`mt-5 flex items-center justify-between gap-3 rounded-lg px-4 py-3 ${
+            expired ? 'bg-red-50 ring-1 ring-inset ring-red-200' : 'bg-amber-50 ring-1 ring-inset ring-amber-200'
+          }`}
+        >
+          <span className="flex items-center gap-2 text-sm font-medium text-amber-800">
+            <AlertIcon width={17} height={17} className={expired ? 'text-red-600' : 'text-amber-600'} />
+            {expired ? 'Your hold has expired' : 'Your seats are held — complete checkout soon'}
+          </span>
           {expired ? (
-            <span className="text-sm font-semibold text-red-700">Expired</span>
+            <span className="text-sm font-bold text-red-700">Expired</span>
           ) : (
-            <Countdown expiresAt={hold.expiresAt} onExpire={() => setExpired(true)} />
+            <Countdown expiresAt={hold.expiresAt} onExpire={() => setExpired(true)} variant="prominent" />
           )}
         </div>
 
-        <ul className="flex flex-col gap-1.5 py-4 text-sm">
-          {hold.seats.map((s) => (
-            <li key={s.id} className="flex justify-between">
-              <span>
-                Seat {s.rowLabel}
-                {s.seatNumber}
+        <div className="mt-5 overflow-hidden rounded-lg border border-neutral-200 bg-white shadow-card">
+          <div className="border-b border-neutral-100 bg-neutral-50/60 p-5">
+            <p className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Event</p>
+            <p className="mt-1 font-display text-base font-bold text-ink-900">{hold.event.title}</p>
+            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm text-neutral-500">
+              <span className="flex items-center gap-1.5">
+                <CalendarIcon width={14} height={14} />
+                {new Date(hold.event.startsAt).toLocaleString(undefined, {
+                  weekday: 'short',
+                  month: 'short',
+                  day: 'numeric',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}
               </span>
-              <span className="text-neutral-500">
-                {hold.event.currency} {s.price}
+              <span className="flex items-center gap-1.5">
+                <MapPinIcon width={14} height={14} />
+                {hold.event.venue.name}
+                {hold.event.venue.city ? `, ${hold.event.venue.city}` : ''}
               </span>
-            </li>
-          ))}
-        </ul>
+            </div>
+          </div>
 
-        <div className="flex items-center justify-between border-t border-neutral-200 pt-3 text-base font-semibold">
-          <span>Total</span>
-          <span>
-            {hold.event.currency} {total.toFixed(2)}
-          </span>
+          <div className="p-5">
+            <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+              <TicketIcon width={14} height={14} />
+              {hold.seats.length} seat{hold.seats.length === 1 ? '' : 's'} selected
+            </p>
+            <ul className="flex flex-col gap-1.5 text-sm">
+              {hold.seats.map((s) => (
+                <li key={s.id} className="flex justify-between">
+                  <span>
+                    Seat {s.rowLabel}
+                    {s.seatNumber}
+                  </span>
+                  <span className="text-neutral-500">{formatMoney(hold.event.currency, s.price)}</span>
+                </li>
+              ))}
+            </ul>
+
+            <div className="mt-4 flex items-center justify-between border-t border-neutral-200 pt-4">
+              <span className="text-base font-bold text-ink-900">Total</span>
+              <span className="text-xl font-bold text-ink-900">{formatMoney(hold.event.currency, total)}</span>
+            </div>
+          </div>
         </div>
+
+        {expired ? (
+          <div className="mt-5 flex flex-col gap-3">
+            <InlineNote tone="error">Your seat hold expired before checkout finished. The seats have been released.</InlineNote>
+            <Button
+              variant="secondary"
+              size="lg"
+              onClick={() => {
+                clearHold();
+                navigate(`/events/${hold.eventId}`);
+              }}
+            >
+              Pick seats again
+            </Button>
+          </div>
+        ) : (
+          <div className="mt-5 flex flex-col gap-3">
+            {error && <InlineNote tone="error">{error}</InlineNote>}
+            <Button onClick={handleConfirm} loading={confirming} size="lg" className="w-full">
+              Confirm booking
+            </Button>
+            <Button variant="ghost" onClick={handleRelease} loading={releasing}>
+              Cancel and release seats
+            </Button>
+          </div>
+        )}
       </div>
-
-      {expired ? (
-        <div className="mt-4 flex flex-col gap-3">
-          <InlineNote tone="error">Your seat hold expired before checkout finished. The seats have been released.</InlineNote>
-          <Button
-            variant="secondary"
-            onClick={() => {
-              clearHold();
-              navigate(`/events/${hold.eventId}`);
-            }}
-          >
-            Pick seats again
-          </Button>
-        </div>
-      ) : (
-        <div className="mt-4 flex flex-col gap-3">
-          {error && <InlineNote tone="error">{error}</InlineNote>}
-          <Button onClick={handleConfirm} loading={confirming} className="w-full">
-            Confirm booking
-          </Button>
-          <Button variant="ghost" onClick={handleRelease} loading={releasing}>
-            Cancel and release seats
-          </Button>
-        </div>
-      )}
     </div>
   );
 }

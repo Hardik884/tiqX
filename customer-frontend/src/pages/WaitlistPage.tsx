@@ -7,6 +7,8 @@ import { Button } from '../components/Button';
 import { Countdown } from '../components/Countdown';
 import { EmptyState, ErrorState, InlineNote, Spinner } from '../components/Feedback';
 import { StatusBadge } from '../components/StatusBadge';
+import { CalendarIcon, ClockIcon, MapPinIcon, SparkleIcon } from '../components/icons';
+import { CONTAINER } from '../lib/ui';
 
 export function WaitlistPage() {
   const [entries, setEntries] = useState<MyWaitlistEntry[]>([]);
@@ -62,12 +64,18 @@ export function WaitlistPage() {
   }
 
   if (loading) return <Spinner label="Loading your waitlist…" />;
-  if (error) return <ErrorState message={error} onRetry={load} />;
+  if (error) {
+    return (
+      <div className={`${CONTAINER} py-10`}>
+        <ErrorState message={error} onRetry={load} />
+      </div>
+    );
+  }
 
   return (
-    <div>
-      <h1 className="text-2xl font-semibold tracking-tight">Waitlist</h1>
-      <p className="mt-1 text-sm text-neutral-500">Sold-out events you've queued for.</p>
+    <div className={`${CONTAINER} py-8 sm:py-10`}>
+      <h1 className="font-display text-2xl font-bold text-ink-900">Waitlist</h1>
+      <p className="mt-1 text-sm text-neutral-500">Sold-out events you've queued for — we'll ping you the moment a seat frees up.</p>
 
       {actionError && (
         <div className="mt-4">
@@ -80,6 +88,7 @@ export function WaitlistPage() {
           <EmptyState
             title="You're not on any waitlists"
             description="Join a waitlist from a sold-out event's page and it'll show up here."
+            icon={<ClockIcon width={22} height={22} />}
             action={
               <Link to="/">
                 <Button variant="secondary">Browse events</Button>
@@ -87,42 +96,63 @@ export function WaitlistPage() {
             }
           />
         ) : (
-          <div className="flex flex-col divide-y divide-neutral-200 border-y border-neutral-200">
-            {entries.map((entry) => (
-              <div key={entry.waitlistEntryId} className="flex flex-wrap items-center justify-between gap-3 py-4">
-                <div>
-                  <p className="font-medium">{entry.eventTitle}</p>
-                  <p className="text-sm text-neutral-500">
-                    {new Date(entry.eventStartsAt).toLocaleString()} · {entry.venueName}
-                  </p>
-                  <p className="mt-0.5 text-xs uppercase tracking-wide text-neutral-400">{entry.seatCategory}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  {entry.offer !== null && entry.offer.status === 'offered' ? (
-                    <>
-                      <div className="text-right text-sm">
-                        <p className="text-neutral-500">Offer expires in</p>
-                        <Countdown expiresAt={entry.offer.expiresAt} />
-                      </div>
-                      <Button onClick={() => handleAccept(entry)} loading={busyId === entry.waitlistEntryId}>
-                        Accept offer
+          <div className="flex flex-col gap-3">
+            {entries.map((entry) => {
+              const hasActiveOffer = entry.offer !== null && entry.offer.status === 'offered';
+              return (
+                <div
+                  key={entry.waitlistEntryId}
+                  className={`flex flex-wrap items-center justify-between gap-4 rounded-lg border bg-white p-4 sm:p-5 ${
+                    hasActiveOffer ? 'border-brand-300 shadow-card ring-1 ring-brand-100' : 'border-neutral-200 shadow-card'
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-display font-semibold text-ink-900">{entry.eventTitle}</p>
+                      {hasActiveOffer && (
+                        <span className="flex items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-brand-700">
+                          <SparkleIcon width={11} height={11} />
+                          Offer active
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm text-neutral-500">
+                      <span className="flex items-center gap-1.5">
+                        <CalendarIcon width={13} height={13} />
+                        {new Date(entry.eventStartsAt).toLocaleString()}
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <MapPinIcon width={13} height={13} />
+                        {entry.venueName}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                      {entry.seatCategory} category
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {hasActiveOffer && entry.offer !== null ? (
+                      <>
+                        <div className="text-right">
+                          <p className="text-xs font-medium text-neutral-500">Offer expires in</p>
+                          <Countdown expiresAt={entry.offer.expiresAt} variant="prominent" />
+                        </div>
+                        <Button onClick={() => handleAccept(entry)} loading={busyId === entry.waitlistEntryId} size="lg">
+                          Accept offer
+                        </Button>
+                      </>
+                    ) : (
+                      <StatusBadge status={entry.status} />
+                    )}
+                    {entry.status === 'waiting' && (
+                      <Button variant="ghost" onClick={() => handleLeave(entry)} loading={busyId === entry.waitlistEntryId}>
+                        Leave
                       </Button>
-                    </>
-                  ) : (
-                    <StatusBadge status={entry.status} />
-                  )}
-                  {entry.status === 'waiting' && (
-                    <Button
-                      variant="ghost"
-                      onClick={() => handleLeave(entry)}
-                      loading={busyId === entry.waitlistEntryId}
-                    >
-                      Leave
-                    </Button>
-                  )}
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
