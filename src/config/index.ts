@@ -187,6 +187,31 @@ const envSchema = z.object({
   NOTIFICATIONS_OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(50),
   NOTIFICATIONS_OUTBOX_RETRY_BASE_MS: z.coerce.number().int().min(100).default(2_000),
   NOTIFICATIONS_OUTBOX_RETRY_MAX_MS: z.coerce.number().int().min(1_000).default(300_000),
+
+  // ---------------------------------------------------------------------------
+  // Real-time seat status (WebSocket)
+  // ---------------------------------------------------------------------------
+  // Claiming seat_status_outbox rows and publishing them to Redis Pub/Sub.
+  REALTIME_OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(20).default(200),
+  REALTIME_OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().max(1_000).default(200),
+  REALTIME_OUTBOX_RETRY_BASE_MS: z.coerce.number().int().min(100).default(1_000),
+  REALTIME_OUTBOX_RETRY_MAX_MS: z.coerce.number().int().min(1_000).default(60_000),
+
+  // How often the WebSocket layer pings each open connection, and how long a
+  // connection has to pong back before it is considered dead and terminated.
+  REALTIME_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1_000).default(30_000),
+  REALTIME_HEARTBEAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(10_000),
+
+  // How many events one WebSocket connection may subscribe to at once, and the
+  // largest message the server accepts from a client - both exist to bound
+  // one connection's cost to the process regardless of what it asks for.
+  REALTIME_MAX_SUBSCRIPTIONS_PER_CONNECTION: z.coerce.number().int().positive().default(50),
+  REALTIME_MAX_MESSAGE_BYTES: z.coerce.number().int().positive().default(4_096),
+
+  // A connection whose outgoing buffer grows past this many bytes is treated
+  // as too slow to keep up; further sends to it are dropped rather than
+  // queued without bound - see websocket-server.ts.
+  REALTIME_MAX_BUFFERED_BYTES: z.coerce.number().int().positive().default(1_048_576),
 });
 
 /**
@@ -284,6 +309,17 @@ export const config = {
     allocationRetryMaxMs: env.WAITLIST_ALLOCATION_RETRY_MAX_MS,
     reconcileIntervalMs: env.WAITLIST_RECONCILE_INTERVAL_MS,
     reconcileBatchSize: env.WAITLIST_RECONCILE_BATCH_SIZE,
+  },
+  realtime: {
+    outboxPollIntervalMs: env.REALTIME_OUTBOX_POLL_INTERVAL_MS,
+    outboxBatchSize: env.REALTIME_OUTBOX_BATCH_SIZE,
+    outboxRetryBaseMs: env.REALTIME_OUTBOX_RETRY_BASE_MS,
+    outboxRetryMaxMs: env.REALTIME_OUTBOX_RETRY_MAX_MS,
+    heartbeatIntervalMs: env.REALTIME_HEARTBEAT_INTERVAL_MS,
+    heartbeatTimeoutMs: env.REALTIME_HEARTBEAT_TIMEOUT_MS,
+    maxSubscriptionsPerConnection: env.REALTIME_MAX_SUBSCRIPTIONS_PER_CONNECTION,
+    maxMessageBytes: env.REALTIME_MAX_MESSAGE_BYTES,
+    maxBufferedBytes: env.REALTIME_MAX_BUFFERED_BYTES,
   },
   auth: {
     jwtSecret: env.JWT_SECRET,

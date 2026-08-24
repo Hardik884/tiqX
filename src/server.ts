@@ -3,6 +3,7 @@ import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { config } from './config/index.js';
 import { closePool, verifyDatabaseConnection } from './db/pool.js';
+import { attachWebSocketServer, closeWebSocketServer } from './realtime/websocket-server.js';
 import { closeRedis, connectRedis, verifyRedisConnection } from './redis/client.js';
 import { logger } from './utils/logger.js';
 
@@ -34,9 +35,13 @@ async function shutdown(server: Server, reason: string, exitCode: number): Promi
         resolve();
       });
     });
-    // Reverse of startup: stop taking work, then release dependencies. Redis
-    // before PostgreSQL only because it is the cheaper handshake to unwind;
-    // neither can be in use once the HTTP server has closed.
+    // Reverse of startup: stop taking work, then release dependencies. The
+    // WebSocket server first - `server.close()` above stops new HTTP
+    // requests and upgrades, but does nothing to sockets already upgraded,
+    // so those are torn down explicitly before either Redis or PostgreSQL
+    // goes away under them. Redis before PostgreSQL only because it is the
+    // cheaper handshake to unwind.
+    await closeWebSocketServer();
     await closeRedis();
     await closePool();
     logger.info('Shutdown complete');
@@ -87,6 +92,20 @@ async function start(): Promise<void> {
     logger.error('HTTP server error', { error: error.message, code: error.code });
     void shutdown(server, 'serverError', 1);
   });
+
+  // Attaches to the same http.Server via its 'upgrade' event - no second
+  // port. Failure here is fatal at startup, the same posture as PostgreSQL
+  // and Redis above: an API that cannot open its real-time channel should
+  // not come up quietly degraded.
+  try {
+    await attachWebSocketServer(server);
+  } catch (error) {
+    logger.error('Unable to start the real-time WebSocket server, aborting startup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    void shutdown(server, 'realtimeStartupFailure', 1);
+    return;
+  }
 
   process.on('SIGTERM', () => void shutdown(server, 'SIGTERM', 0));
   process.on('SIGINT', () => void shutdown(server, 'SIGINT', 0));
