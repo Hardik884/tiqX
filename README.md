@@ -70,6 +70,7 @@ npm start
 | `GET`  | `/api/v1/auth/me`       | The authenticated principal. **Auth.**      |
 | `POST` | `/api/v1/events`| Create an event and its inventory. **Organiser/admin.** |
 | `POST` | `/api/v1/events/:eventId/holds` | Temporarily hold seats. **Auth.**   |
+| `POST` | `/api/v1/events/:eventId/holds/:holdId/confirm` | Convert a hold into a booking. **Auth.** |
 
 Neither endpoint returns configuration, credentials or connection details.
 `/health/ready` responds `503` with `{"dependencies":{"database":"down"}}` when
@@ -99,7 +100,9 @@ migrations/                versioned schema migrations (node-pg-migrate)
 | `venues`      | physical venues                                      |
 | `venue_seats` | the physical seat layout of a venue                  |
 | `events`      | movies and concerts scheduled at a venue             |
-| `show_seats`  | per-event inventory state of each physical seat      |
+| `show_seats`  | per-event inventory state of each physical seat, and its price |
+| `bookings`    | confirmed bookings, with a total snapshot            |
+| `booking_seats` | which seats a booking covers, at the price charged |
 | `reservation_holds` | a customer's temporary claim on seats of one event |
 | `reservation_hold_seats` | which show seats a hold covers                |
 | `idempotency_keys` | stored responses that make a retried write safe to repeat |
@@ -671,6 +674,158 @@ rather than serving traffic it cannot protect - a crash-looping container is a
 louder signal than an API quietly returning 503s. Shutdown closes the HTTP
 server, then Redis, then the PostgreSQL pool, through the existing graceful
 shutdown path.
+
+## Booking confirmation
+
+A hold becomes a booking through one endpoint:
+
+```
+POST /api/v1/events/:eventId/holds/:holdId/confirm
+Authorization: Bearer <access-token>
+Idempotency-Key: <required>
+```
+
+There is no request body. The owner is the authenticated principal and nothing
+else, so there is nothing a client could put in one.
+
+```jsonc
+// 201
+{ "bookingId": "...", "bookingReference": "TX-2026-K4M9QP2X", "eventId": "...",
+  "holdId": "...", "status": "confirmed", "seatCount": 3,
+  "totalAmount": "1350.30", "currency": "INR", "createdAt": "..." }
+```
+
+### This is not payment confirmation
+
+Confirming means the reservation is durably converted into a booking. No money
+moves, and `bookings` has deliberately no payment status - two states, not a
+half-built payment machine. The shape lets payment slot in *front* later:
+
+```
+authorise payment  ->  confirm booking (this transaction)
+```
+
+The reverse - confirm first, reconcile payment after - is how you end up owing
+seats you were never paid for.
+
+### State machines
+
+The schema already had the states this needed, so neither CHECK constraint
+changed. A confirmed hold is `converted`, the value `reservation_holds` has
+allowed since it was created.
+
+```
+hold:   active ──> converted     (confirmation)
+               └─> expired       (worker or opportunistic reclamation)
+        converted / expired / cancelled are terminal
+
+seat:   available ──> held ──> booked
+                  <──┘
+        available ──> booked is impossible through this endpoint
+```
+
+`expired -> converted` and `converted -> active` are not merely rejected - the
+UPDATE that performs each transition is guarded on the state it comes from, so
+they cannot happen even if a check above were removed.
+
+### The transaction
+
+Everything commits together or not at all:
+
+```
+BEGIN                            (owned by the idempotency wrapper)
+  claim idempotency key
+  lock the hold's seats FOR UPDATE, ascending id
+  lock the hold FOR UPDATE
+  verify: exists, owned by caller, same event, active, not expired
+  verify: every seat is still held
+  insert booking
+  insert booking_seats           (one set-based statement, price snapshot)
+  total_amount = SUM(booking_seats.price)     in SQL
+  show_seats -> booked           (guarded on status = 'held')
+  hold -> converted              (guarded on status = 'active')
+  store the idempotency response
+COMMIT
+```
+
+There is no observable ordering: a booking without booked seats, or a booked
+seat without a booking, cannot be read by anyone.
+
+### Lock order
+
+One global order, followed by every path that touches these tables:
+
+```
+idempotency_keys  ->  show_seats (ascending id)  ->  reservation_holds
+```
+
+Reservation, the expiration worker and confirmation all obey it. Two of the
+three naturally start from a hold, so taking the hold lock first is the
+tempting mistake and the one that cycles against a reservation coming the other
+way. Deadlocks are avoided by ordering, not by leaving PostgreSQL to detect
+them.
+
+### Money
+
+Every monetary column is `NUMERIC(12,2)`; every sum is computed by PostgreSQL;
+totals cross the API as strings. `450.10 x 3` is `1350.30` here and
+`1350.3000000000002` in binary floating point, and money that does not add up
+is a reconciliation failure rather than a rounding curiosity.
+
+`booking_seats.price` is a **snapshot** taken at confirmation. Reprice the event
+afterwards and the booking is unchanged - a booking must be able to explain
+itself without reference to today's prices.
+
+Pricing itself is deliberately minimal: a `price` on each `show_seats` row (the
+grain price actually varies at - the same physical seat costs different amounts
+at different events) and one `currency` per event. Optional `pricing` at event
+creation fills it in. That is not a pricing engine and is not meant to be.
+
+### Ownership, and what the API will not tell you
+
+A hold that does not exist, is not yours, or belongs to a different event all
+return the **same 404**. A 403 would confirm to a prober that the hold is real,
+which is a small leak of another customer's activity for no benefit to any
+honest client. The distinction is kept in the server logs, where an operator can
+see it and an attacker cannot.
+
+| Code | Status | Meaning |
+| ---- | ------ | ------- |
+| `HOLD_NOT_FOUND` | 404 | unknown, not yours, or wrong event |
+| `HOLD_EXPIRED` | 409 | its time passed, by PostgreSQL's clock |
+| `HOLD_ALREADY_CONFIRMED` | 409 | already converted |
+| `HOLD_INVALID` | 409 | cancelled or otherwise unusable |
+| `CONFIRMATION_CONFLICT` | 409 | seats and hold disagree |
+| `idempotency_key_reuse` | 409 | key reused for a different hold |
+
+### Database invariants
+
+Constraints, not just code:
+
+- `UNIQUE (bookings.hold_id)` - one booking per hold.
+- `UNIQUE (booking_seats.show_seat_id)` - **a show seat belongs to at most one
+  booking.** Stricter than "one *confirmed* booking", which a partial unique
+  index cannot express because the status lives on another table. The strict
+  rule is right today: cancellation does not release seats. It also subsumes
+  `UNIQUE (booking_id, show_seat_id)` - a seat that appears at most once
+  overall cannot appear twice within one booking - so that second index was not
+  added.
+- `total_amount >= 0`, `price >= 0`, status CHECKs, currency shape.
+- `user_id` and `event_id` are `RESTRICT`, not `CASCADE`: a financial record
+  must not vanish because a user row was deleted.
+
+These are load-bearing rather than decorative. Removing both row locks from the
+confirmation path leaves the concurrency tests passing, because the unique
+constraints alone still prevent a duplicate; only when the constraints are
+dropped as well does the 50-way test produce duplicate bookings.
+
+### Deferred
+
+Cancellation is designed for - `bookings.status` already allows `cancelled` -
+but not implemented, and it does not release seats. When it does, the seat
+uniqueness constraint becomes a partial unique index over a denormalised
+status. Payments, refunds and ticket delivery are all out of scope here.
+
 
 ## Hold expiration
 

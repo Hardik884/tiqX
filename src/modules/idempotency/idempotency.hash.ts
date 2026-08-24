@@ -36,3 +36,30 @@ export function hashHoldRequest(fingerprint: HoldRequestFingerprint): string {
 
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
+
+/**
+ * The fields that identify one confirmation request.
+ *
+ * A confirmation has no meaningful body - the hold id is in the URL - so the
+ * identity is the tuple that decides what the operation does: who is asking,
+ * which event, which hold. Reusing a key for a different hold is therefore a
+ * mismatch and is refused, exactly as it is for a hold request.
+ */
+export interface ConfirmRequestFingerprint {
+  userId: string;
+  eventId: string;
+  holdId: string;
+}
+
+/** Versioned separately from the hold digest, so the two can never collide. */
+export function hashConfirmRequest(fingerprint: ConfirmRequestFingerprint): string {
+  const canonical = JSON.stringify({
+    v: 1,
+    op: 'confirm-hold',
+    userId: fingerprint.userId,
+    eventId: fingerprint.eventId,
+    holdId: fingerprint.holdId,
+  });
+
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}

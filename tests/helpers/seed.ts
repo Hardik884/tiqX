@@ -80,6 +80,18 @@ export async function seedVenue(
  * venue seats those rows referenced.
  */
 export async function cleanupSeedData(): Promise<void> {
+  // Bookings first. Their user and event foreign keys are ON DELETE RESTRICT -
+  // a financial record must not vanish with a cascade - so nothing below can be
+  // removed while a booking still points at it. Deleting the booking takes its
+  // booking_seats with it, which in turn releases the RESTRICT those rows hold
+  // on show_seats.
+  await query(
+    `DELETE FROM bookings
+     WHERE user_id = ANY($1::uuid[])
+        OR event_id = ANY($2::uuid[])
+        OR event_id IN (SELECT id FROM events WHERE venue_id = ANY($3::uuid[]))`,
+    [createdUserIds, createdEventIds, createdVenueIds],
+  );
   await query('DELETE FROM events WHERE venue_id = ANY($1::uuid[])', [createdVenueIds]);
   await query('DELETE FROM events WHERE id = ANY($1::uuid[])', [createdEventIds]);
   await query('DELETE FROM venue_seats WHERE venue_id = ANY($1::uuid[])', [createdVenueIds]);

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 
+import { confirmHoldHandler } from '../bookings/booking.controller.js';
 import { createHoldHandler } from './reservation.controller.js';
 
 /**
@@ -9,3 +10,8 @@ import { createHoldHandler } from './reservation.controller.js';
 export const reservationRouter = Router({ mergeParams: true });
 
 reservationRouter.post('/', createHoldHandler);
+
+// POST /api/v1/events/:eventId/holds/:holdId/confirm
+// Authentication is applied where this router is mounted, so the confirmation
+// handler always has a principal.
+reservationRouter.post('/:holdId/confirm', confirmHoldHandler);

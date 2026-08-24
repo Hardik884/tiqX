@@ -44,6 +44,8 @@ export async function createEventHandler(req: Request, res: Response): Promise<v
     startsAt: new Date(body.startsAt),
     endsAt: new Date(body.endsAt),
     status: body.status,
+    pricing: body.pricing,
+    currency: body.currency,
   });
 
   res.status(201).json({

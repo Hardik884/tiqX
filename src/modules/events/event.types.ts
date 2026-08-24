@@ -18,6 +18,18 @@ export interface EventRecord {
   updatedAt: Date;
 }
 
+/**
+ * Prices per seat category, as decimal strings.
+ *
+ * Strings, not numbers: the value goes straight to a NUMERIC column, and
+ * parsing it into a JavaScript float on the way would reintroduce exactly the
+ * imprecision NUMERIC exists to avoid.
+ */
+export type SeatPricing = Partial<Record<SeatCategory, string>>;
+
+export const SEAT_CATEGORIES = ['standard', 'premium'] as const;
+export type SeatCategory = (typeof SEAT_CATEGORIES)[number];
+
 export interface CreateEventInput {
   organiserId: string;
   venueId: string;
@@ -27,4 +39,7 @@ export interface CreateEventInput {
   startsAt: Date;
   endsAt: Date;
   status?: EventStatus | undefined;
+  /** Omitted categories keep the column default of 0, i.e. a free seat. */
+  pricing?: SeatPricing | undefined;
+  currency?: string | undefined;
 }

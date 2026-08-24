@@ -33,8 +33,8 @@ function toEventRecord(row: EventRow): EventRecord {
 
 export async function insertEvent(db: Queryable, input: CreateEventInput): Promise<EventRecord> {
   const result = await db.query<EventRow>(
-    `INSERT INTO events (organiser_id, venue_id, title, description, event_type, starts_at, ends_at, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'draft'))
+    `INSERT INTO events (organiser_id, venue_id, title, description, event_type, starts_at, ends_at, status, currency)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'draft'), COALESCE($9, 'INR'))
      RETURNING *`,
     [
       input.organiserId,
@@ -45,6 +45,7 @@ export async function insertEvent(db: Queryable, input: CreateEventInput): Promi
       input.startsAt,
       input.endsAt,
       input.status ?? null,
+      input.currency ?? null,
     ],
   );
 

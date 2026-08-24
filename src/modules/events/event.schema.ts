@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { EVENT_STATUSES, EVENT_TYPES } from './event.types.js';
+import { EVENT_STATUSES, EVENT_TYPES, SEAT_CATEGORIES } from './event.types.js';
 
 /**
  * `organiserId` is absent for the same reason `userId` is absent from the hold
@@ -19,6 +19,12 @@ export const createEventSchema = z
     startsAt: z.iso.datetime({ offset: true }),
     endsAt: z.iso.datetime({ offset: true }),
     status: z.enum(EVENT_STATUSES).optional(),
+    // Decimal strings so the value reaches NUMERIC without passing through a
+    // float. Two decimal places, non-negative, bounded.
+    pricing: z
+      .record(z.enum(SEAT_CATEGORIES), z.string().regex(/^\d{1,8}(\.\d{1,2})?$/, 'must be a decimal amount'))
+      .optional(),
+    currency: z.string().regex(/^[A-Z]{3}$/, 'must be a 3-letter ISO code').optional(),
   })
   .strict()
   .refine((value) => new Date(value.endsAt) > new Date(value.startsAt), {

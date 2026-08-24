@@ -35,7 +35,12 @@ export async function createEvent(input: CreateEventInput): Promise<CreateEventR
         throw new BadRequestError('Venue has no seats configured, so no seat inventory can be created');
       }
 
-      const seatInventoryCount = await createShowSeatsForEvent(client, event.id, venueSeatIds);
+      const seatInventoryCount = await createShowSeatsForEvent(
+        client,
+        event.id,
+        venueSeatIds,
+        input.pricing,
+      );
 
       return { event, seatInventoryCount };
     });
