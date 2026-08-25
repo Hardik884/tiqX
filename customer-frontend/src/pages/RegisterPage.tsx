@@ -5,6 +5,7 @@ import { ApiError } from '../api/client';
 import { Button } from '../components/Button';
 import { InlineNote } from '../components/Feedback';
 import { AuthShell } from '../components/AuthShell';
+import { ChevronRightIcon } from '../components/icons';
 import { useAuthStore } from '../store/auth';
 
 export function RegisterPage() {
@@ -80,6 +81,38 @@ export function RegisterPage() {
           Sign in
         </Link>
       </p>
+
+      {/*
+        There is no separate organiser or admin sign-up, and deliberately so:
+        registration never accepts a role from the client, so everyone starts
+        with the account created above and an admin grants the rest. These are
+        the way in to each workspace rather than a second form - signed out,
+        both send you through sign-in first, and a customer who follows one is
+        turned around at the door.
+      */}
+      <div className="mt-6 rounded-lg border border-neutral-200 bg-white p-4">
+        <p className="text-sm font-semibold text-ink-900">Are you an organiser?</p>
+        <p className="mt-1 text-xs leading-relaxed text-neutral-500">
+          Organisers and admins use the same tiqX account. Create one above, then an admin turns on your
+          access — after that your workspace appears right here.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Link
+            to="/organiser"
+            className="inline-flex items-center gap-1 rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-semibold text-ink-800 transition-colors hover:border-ink-900 focus-ring"
+          >
+            Organiser workspace
+            <ChevronRightIcon width={13} height={13} />
+          </Link>
+          <Link
+            to="/admin"
+            className="inline-flex items-center gap-1 rounded-md border border-neutral-300 px-3 py-1.5 text-xs font-semibold text-ink-800 transition-colors hover:border-ink-900 focus-ring"
+          >
+            Admin workspace
+            <ChevronRightIcon width={13} height={13} />
+          </Link>
+        </div>
+      </div>
     </AuthShell>
   );
 }
