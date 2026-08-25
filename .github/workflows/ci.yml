@@ -60,6 +60,13 @@ jobs:
       DATABASE_SSL: 'false'
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-only-jwt-secret-value-not-used-anywhere-else-1234
+      # The test suite spoofs per-test client IPs via X-Forwarded-For to keep
+      # rate-limit buckets isolated between tests (see tests/helpers/redis.ts
+      # `uniqueClientIp`) and some suites test the limiter's own IP-keying
+      # directly - Express only honours that header with trust proxy enabled.
+      # Without this every request collapses onto one real socket IP and the
+      # shared rate-limit counter trips early across unrelated tests.
+      TRUST_PROXY: 'true'
 
     steps:
       - name: Checkout
