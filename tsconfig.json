@@ -23,5 +23,5 @@
     "sourceMap": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "migrations/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "migrations/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]
 }
