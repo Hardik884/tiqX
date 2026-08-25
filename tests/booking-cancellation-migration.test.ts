@@ -149,7 +149,11 @@ describe('booking cancellation migration', () => {
     assert.match(plans.lockSeats, liveSeatsOfBooking, 'the seats of a booking');
     assert.match(plans.lockSeats, /Index Scan using show_seats_pkey/, 'then each seat by id');
     assert.match(plans.retireSeatRows, liveSeatsOfBooking);
-    assert.match(plans.releaseSeats, /Index Scan using show_seats_pkey/);
+    // Same story as liveSeatsOfBooking above: releaseSeats filters on both
+    // `id = ANY(...)` and `status = 'booked'`, and either show_seats_pkey or
+    // the (event_id, status) index can lead the scan - the planner's call,
+    // not a fixed answer. Both are real, both are indexed, so both pass.
+    assert.match(plans.releaseSeats, /Index Scan using (show_seats_pkey|show_seats_event_id_status_idx)/);
     assert.match(
       plans.restrictCheck,
       /booking_seats_show_seat_id_idx/,
