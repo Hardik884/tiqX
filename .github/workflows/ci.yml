@@ -1,0 +1,121 @@
+name: CI
+
+# PR CI is the actual gate: main only receives commits that already passed
+# these jobs via required-status-checks branch protection (configured in
+# GitHub repo settings, not here). CI on push to main re-confirms the same
+# commit after merge and gives the Vercel/Render deploys (triggered by their
+# own Git integrations, independent of this workflow) a clear pass/fail
+# signal.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel a superseded run on the same branch/PR instead of letting it finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend (src/, migrations/, tests/) - npm workspace at the repo root.
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+
+    # Real PostgreSQL and Redis, matching the versions used in local dev
+    # (README's `docker run postgres:16-alpine` / `redis:7-alpine`). The
+    # backend test suite is integration-level on purpose (see tests/) and
+    # cannot run against mocks - see the README's CI/CD section.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tiqx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Dedicated, disposable CI-only values - not production secrets, so
+      # they are safe to keep in the workflow file rather than as repo
+      # secrets. Never point CI at a real database or Redis instance.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/tiqx
+      DATABASE_SSL: 'false'
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-only-jwt-secret-value-not-used-anywhere-else-1234
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply migrations to the CI database
+        run: npm run migrate:up
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Unified frontend (customer-frontend/) - the single app (customer booking
+  # plus the /organiser and /admin workspaces) deployed to Vercel, see
+  # customer-frontend/vercel.json. frontend/ is superseded and unused (see
+  # frontend/README.md) - it is not built here for the same reason it is not
+  # deployed.
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: customer-frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: customer-frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `build` runs `tsc -p tsconfig.json --noEmit` before `vite build`, so
+      # this single script is both the typecheck and the production build -
+      # there is no separate typecheck script to invoke.
+      - name: Typecheck + build
+        run: npm run build

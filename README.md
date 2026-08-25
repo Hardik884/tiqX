@@ -238,13 +238,17 @@ atomicity this system depends on).
 
 ## Production deployment overview
 
-There is no Dockerfile or CI pipeline in this repository yet — deploying
-today means provisioning the pieces below directly:
+The unified frontend (`customer-frontend/` — customer booking plus the
+`/organiser` and `/admin` workspaces) is deployed on **Vercel**; the API and
+workers (`src/`) are deployed on **Render**; PostgreSQL and Redis are
+managed production services. See [CI/CD](#cicd) below for how a change gets
+from a pull request to production. Provisioning notes:
 
 1. Managed PostgreSQL and Redis (set `DATABASE_SSL=true` and a `rediss://`
    URL if your providers require TLS).
 2. Run `npm run migrate:up` against production `DATABASE_URL` before first
-   deploy and on every schema change.
+   deploy and on every schema change (see [Production migrations](#production-migrations)
+   below for how this runs automatically on Render).
 3. Build and run the API (`npm run build && npm start`) with `NODE_ENV=production`,
    a real random `JWT_SECRET`, `CORS_ORIGIN` restricted to your actual
    frontend origins, and `TRUST_PROXY=true` only if you're behind a reverse
@@ -265,6 +269,95 @@ today means provisioning the pieces below directly:
    not survive an HTTP-layer proxy — see `src/lib/seatSocket.ts`).
 7. Point `/health` and `/health/ready` at your load balancer's liveness and
    readiness checks respectively.
+
+## CI/CD
+
+```
+PR  →  GitHub Actions CI  →  merge to main  →  Vercel/Render deployment  →  production migrations  →  production
+```
+
+**On every pull request and every push to `main`**, [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+runs two jobs in parallel — see that file for the exact commands:
+
+| Job | What it runs | Against |
+| --- | --- | --- |
+| `backend` | `npm ci`, `npm run migrate:up`, `npm run typecheck`, `npm run build`, `npm test` | disposable PostgreSQL 16 + Redis 7 [GitHub Actions services](https://docs.github.com/en/actions/using-containerized-services/about-service-containers), created fresh per run |
+| `frontend` (`customer-frontend/`) | `npm ci`, `npm run build` (type-checks via `tsc --noEmit`, then `vite build`) | — |
+
+`frontend/`, the superseded standalone dashboard (see `frontend/README.md`),
+is not built in CI for the same reason it is not deployed: nothing runs it
+any more. Any job failing fails the whole workflow. The backend suite is
+integration-level by design (see [Running tests / typecheck / build](#running-tests--typecheck--build)),
+so CI gives it a real, ephemeral PostgreSQL/Redis rather than mocking either
+— never a production database or a production Redis instance. `JWT_SECRET`
+and the CI `DATABASE_URL`/`REDIS_URL` in the workflow are throwaway values
+scoped to that one run, not secrets, and are not accepted as valid
+production values (`src/config/index.ts` rejects placeholder secrets).
+
+**Merging to `main` is the actual gate.** The pull-request run is what
+keeps broken code out — configure `backend` and `frontend` as required
+status checks under the repository's branch protection settings for `main`
+so a PR cannot merge while either is red. Once on `main`:
+
+- **Frontend deployment** — Vercel's own Git integration builds and
+  deploys `customer-frontend/` (the unified frontend) whenever `main`
+  updates; there is no separate Vercel step in this workflow, so the same
+  app is never deployed twice. If that Git integration is ever
+  disconnected, the fallback is the [Vercel CLI](https://vercel.com/docs/cli)
+  run manually or from a new job using `VERCEL_TOKEN`/`VERCEL_ORG_ID`/`VERCEL_PROJECT_ID`
+  secrets — not needed today.
+- **Backend deployment** — Render's own Git integration builds and deploys
+  `src/` whenever `main` updates, the same way. If that is ever
+  disconnected, the fallback is a `RENDER_DEPLOY_HOOK_URL` GitHub secret
+  and a minimal `curl` step; again, not needed today.
+
+### Production migrations
+
+`npm run migrate:up` must only ever run against the production
+`DATABASE_URL`, and never as part of the PR/main CI run above (CI only
+migrates its own disposable database). Point Render's **Pre-Deploy
+Command** for the backend service at:
+
+```
+npm run migrate:up
+```
+
+Render runs this before each deploy, using the `DATABASE_URL` already
+configured in that service's own environment — the production connection
+string never appears in a workflow file or a GitHub secret. If a
+Render plan doesn't support a pre-deploy command, run
+`npm run migrate:up` manually against production `DATABASE_URL` (e.g. from
+a trusted machine or Render's shell) before triggering that deploy — the
+one thing to avoid is a service starting against a schema its code
+doesn't match yet.
+
+### Secrets
+
+Nothing in `.github/workflows/ci.yml` needs a GitHub secret — every value
+it uses is a disposable CI-only credential for services it creates itself.
+Secrets only enter the picture if a fallback above is ever needed:
+
+| Secret | Where it lives | Needed for |
+| --- | --- | --- |
+| `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` | GitHub repo secrets | only if Vercel's Git integration is disconnected and a manual CLI deploy step is added |
+| `RENDER_DEPLOY_HOOK_URL` | GitHub repo secrets | only if Render's Git integration is disconnected and a manual deploy-hook step is added |
+| `JWT_SECRET`, `DATABASE_URL`, `REDIS_URL`, `RESEND_API_KEY`/`BREVO_API_KEY` | Render service environment (and Vercel, where relevant) | production runtime only — never set these in a GitHub Actions workflow or secret |
+
+### Investigating a failed deployment
+
+1. **PR/main CI red** — open the failing job in the Actions tab; it names
+   which of typecheck/build/test/migrate failed and why. Nothing here talks
+   to production, so a CI failure never risks it.
+2. **Vercel build failed** — check the deployment's build log in the Vercel
+   dashboard; it only affects `customer-frontend/`.
+3. **Render deploy failed** — check the service's deploy log in the Render
+   dashboard. A pre-deploy command failure (e.g. a broken migration) blocks
+   that deploy, which is the point — the running production instance keeps
+   serving the previous, working release until a fix lands.
+4. **Migration failed on Render** — read the pre-deploy log for the failing
+   migration, fix it in a new PR (through CI as usual — see
+   [Running migrations](#running-migrations) for `migrate:down`
+   semantics), and let the corrected deploy retry the pre-deploy command.
 
 ## Further reading
 
