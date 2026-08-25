@@ -139,11 +139,13 @@ describe('booking cancellation migration', () => {
     });
 
     assert.match(plans.lockBooking, /Index Scan using bookings_pkey/);
-    // Either index answers "the live seats of this booking", and which one the
-    // planner combines them into depends on the statistics of the moment. The
-    // assertion that matters is the Seq Scan check below; this one only says an
-    // index is reachable at all.
-    const liveSeatsOfBooking = /booking_seats_(booking_id_idx|live_show_seat_key)/;
+    // Any of these three indexes answers "the live seats of this booking" -
+    // directly (booking_id_idx, live_show_seat_key) or via the join predicate
+    // against show_seats (show_seat_id_idx, chosen when the planner executes
+    // this as a semi join) - and which one the planner reaches for depends on
+    // the statistics of the moment. The assertion that matters is the Seq
+    // Scan check below; this one only says an index is reachable at all.
+    const liveSeatsOfBooking = /booking_seats_(booking_id_idx|live_show_seat_key|show_seat_id_idx)/;
     assert.match(plans.lockSeats, liveSeatsOfBooking, 'the seats of a booking');
     assert.match(plans.lockSeats, /Index Scan using show_seats_pkey/, 'then each seat by id');
     assert.match(plans.retireSeatRows, liveSeatsOfBooking);
