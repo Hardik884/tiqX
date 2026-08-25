@@ -152,12 +152,14 @@ src/
   workers/                 the three background worker entry points
   utils/logger.ts          structured JSON logger
 migrations/                versioned schema migrations (node-pg-migrate)
+scripts/                   seed-demo.ts — the reviewer/demo data seed
 tests/                     integration tests (real PostgreSQL + Redis)
 customer-frontend/         the tiqX web app — customer, organiser and admin
                            (React/Vite/Tailwind, one deployment)
 frontend/                  superseded standalone organiser/admin dashboard;
                            kept for reference, not deployed or built
 docs/                      API.md, DATABASE.md, ARCHITECTURE.md, SYSTEM_DESIGN.md
+.github/workflows/         CI — see CI/CD below
 ```
 
 ## Prerequisites
@@ -175,8 +177,11 @@ git clone https://github.com/Hardik884/tiqX.git
 cd tiqX
 npm install                       # backend
 cd customer-frontend && npm install && cd ..
-cd frontend && npm install && cd ..
 ```
+
+(`frontend/` is the superseded standalone dashboard — see
+[Repository structure](#repository-structure) — and does not need installing
+to run tiqX.)
 
 ## Environment setup
 
