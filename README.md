@@ -7,6 +7,62 @@ with time-limited offers when a seat frees up. Backend in TypeScript/Express
 on PostgreSQL and Redis; one React frontend serving customers, organisers and
 admins from a single deployment.
 
+## Reviewing this project
+
+**Live app: https://tiq-x.vercel.app** — customer, organiser and admin are all
+one deployment, so every role signs in at the same `/login`:
+
+| Role | Email | Where it takes you |
+| --- | --- | --- |
+| Admin | `admin@tiqx.demo` | **Admin** in the header, or `/admin` |
+| Organiser | `organiser@tiqx.demo` | **Organiser** in the header, or `/organiser` |
+| Customer | `customer@tiqx.demo` | browse and book from `/` |
+
+<!-- Shared sign-in secret for the three accounts above: SEE SUBMISSION NOTES.
+     Deliberately not committed - it is a live credential, and anything written
+     here is public forever, including in the history after it is rotated. -->
+
+The header only shows a workspace to a role that has it, and typing `/admin`
+as a customer redirects home — the API answers `403` to the same request
+regardless, which is the check that actually matters.
+
+Worth trying, in about five minutes:
+
+1. **Customer** — pick an event from the home page, select seats, and watch the
+   hold countdown start. Confirm, and the booking comes back with QR tickets;
+   cancel it and the seats go straight back into the map. Open the same event
+   in a second window to see a seat flip to *held* in real time.
+2. **Organiser** — the dashboard totals come from the API, not the browser.
+   **Create event** takes a venue, a date/time and a price per seat category;
+   save it as a draft, publish it from the event page, then check
+   **Bookings & revenue** for anything a customer just booked.
+3. **Admin** — **Venues** builds a seat layout a row at a time and switches any
+   seat between premium and standard; **People** promotes an account to
+   organiser (registration never accepts a role from the client, so this is how
+   organisers come to exist); **Events** lists every organiser's events.
+
+Anyone can register at `/register` — new accounts are always customers, and the
+sign-up page links through to both workspaces.
+
+### Running it yourself
+
+Follow [Installation](#installation) through [Running migrations](#running-migrations),
+then create the same three accounts, a venue with a premium/standard seat
+layout, and some events to book:
+
+```bash
+DEMO_PASSWORD='pick-something-12-chars-or-more' npm run seed:demo
+```
+
+Omit `DEMO_PASSWORD` and one is generated and printed once — nothing is stored
+in the repository either way. The seed is safe to re-run: each step creates
+what is missing and leaves everything else alone, and it will not touch a
+`NODE_ENV=production` database without `--force`.
+
+Then start the API (`npm run dev`), the workers, and the frontend
+(`cd customer-frontend && npm run dev`), and sign in with any of the three
+accounts above.
+
 ## Main features
 
 - **Auth** — registration, login, short-lived access tokens + rotating
@@ -211,9 +267,10 @@ older standalone dashboard in `frontend/` has been superseded by these
 routes and is no longer built or deployed.
 
 Everyone registers as a customer; an admin promotes an account to
-`organiser` (or `admin`) from **Admin → People**. The very first admin has
-to be set directly in the database, since there is no account to promote
-them from:
+`organiser` (or `admin`) from **Admin → People**. The first admin cannot come
+from there - there is no account to promote them from - so `npm run seed:demo`
+creates one (see [Reviewing this project](#reviewing-this-project)). To make an
+existing account an admin instead:
 
 ```sql
 UPDATE users SET role = 'admin' WHERE email = 'you@example.com';
