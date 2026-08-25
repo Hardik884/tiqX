@@ -87,9 +87,6 @@ accounts above.
   management (premium/standard categories), every organiser's events, and
   account role management.
 
-Not implemented: payments (confirming a hold does not charge anything —
-see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) and password reset.
-
 ## Architecture overview
 
 ```
@@ -156,8 +153,6 @@ scripts/                   seed-demo.ts — the reviewer/demo data seed
 tests/                     integration tests (real PostgreSQL + Redis)
 customer-frontend/         the tiqX web app — customer, organiser and admin
                            (React/Vite/Tailwind, one deployment)
-frontend/                  superseded standalone organiser/admin dashboard;
-                           kept for reference, not deployed or built
 docs/                      API.md, DATABASE.md, ARCHITECTURE.md, SYSTEM_DESIGN.md
 .github/workflows/         CI — see CI/CD below
 ```
@@ -178,10 +173,6 @@ cd tiqX
 npm install                       # backend
 cd customer-frontend && npm install && cd ..
 ```
-
-(`frontend/` is the superseded standalone dashboard — see
-[Repository structure](#repository-structure) — and does not need installing
-to run tiqX.)
 
 ## Environment setup
 
@@ -267,9 +258,7 @@ Runs on `http://localhost:5173` and proxies `/api` and `/ws` to
 additional configuration needed against a locally running API.
 
 The organiser workspace lives at `/organiser` and the admin workspace at
-`/admin` inside the same app — there is no second frontend to start. The
-older standalone dashboard in `frontend/` has been superseded by these
-routes and is no longer built or deployed.
+`/admin` inside the same app — there is no second frontend to start.
 
 Everyone registers as a customer; an admin promotes an account to
 `organiser` (or `admin`) from **Admin → People**. The first admin cannot come
@@ -346,9 +335,7 @@ runs two jobs in parallel — see that file for the exact commands:
 | `backend` | `npm ci`, `npm run migrate:up`, `npm run typecheck`, `npm run build`, `npm test` | disposable PostgreSQL 16 + Redis 7 [GitHub Actions services](https://docs.github.com/en/actions/using-containerized-services/about-service-containers), created fresh per run |
 | `frontend` (`customer-frontend/`) | `npm ci`, `npm run build` (type-checks via `tsc --noEmit`, then `vite build`) | — |
 
-`frontend/`, the superseded standalone dashboard (see `frontend/README.md`),
-is not built in CI for the same reason it is not deployed: nothing runs it
-any more. Any job failing fails the whole workflow. The backend suite is
+Any job failing fails the whole workflow. The backend suite is
 integration-level by design (see [Running tests / typecheck / build](#running-tests--typecheck--build)),
 so CI gives it a real, ephemeral PostgreSQL/Redis rather than mocking either
 — never a production database or a production Redis instance. `JWT_SECRET`

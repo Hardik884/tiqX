@@ -245,11 +245,3 @@ row lock decides the outcome; the loser's own guarded `UPDATE` on
 reaches the offer-specific update. A hold expiring under an in-flight accept
 surfaces to the customer as `OFFER_EXPIRED`; a hold already confirmed
 surfaces as `OFFER_ALREADY_ACCEPTED`.
-
-### What is deliberately deferred
-
-`waitlist_notification_outbox` is a durable producer with **no consumer**:
-no email, SMS, or push notification is ever sent for a waitlist offer today
-(this is different from ticket-issuance email, which *is* sent — see the
-outbox in [DATABASE.md](DATABASE.md)). A customer only learns about an offer
-by checking `GET /api/v1/waitlist/mine` in the product.

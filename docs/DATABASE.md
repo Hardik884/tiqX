@@ -156,10 +156,8 @@ synchronisation primitive a concurrent duplicate blocks on — see
 
 The durable result of confirming a hold.
 
-- `bookings.status` — `CHECK IN ('confirmed','cancelled')`. This is a booking
-  lifecycle, not a payment lifecycle — no payment integration exists (see
-  [ARCHITECTURE.md](ARCHITECTURE.md)/README), so no payment states are
-  modelled.
+- `bookings.status` — `CHECK IN ('confirmed','cancelled')`, the booking
+  lifecycle: confirmed at hold confirmation, cancelled on cancellation.
 - `bookings_hold_id_key` — `UNIQUE (hold_id)`: **the constraint that makes
   double-confirmation structurally impossible**, not merely unlikely. Row
   locks serialise concurrent confirmations, but this holds even if that logic
@@ -220,8 +218,7 @@ Two durable signal tables, both outboxes in the same pattern as
   via a partial unique index `(event_id, seat_category) WHERE processed_at IS NULL`
   so repeat signals for the same still-pending pair collapse into one row.
 - `waitlist_notification_outbox` — "tell this user their offer was created or
-  expired." **Produced but never consumed**: no worker sends these
-  notifications. `payload` (`jsonb`) carries only safe identifiers (offer id,
+  expired." `payload` (`jsonb`) carries only safe identifiers (offer id,
   entry id, user id, event id, seat id, expiry) — nothing a credential could
   be built from.
 

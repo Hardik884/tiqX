@@ -96,9 +96,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # Unified frontend (customer-frontend/) - the single app (customer booking
   # plus the /organiser and /admin workspaces) deployed to Vercel, see
-  # customer-frontend/vercel.json. frontend/ is superseded and unused (see
-  # frontend/README.md) - it is not built here for the same reason it is not
-  # deployed.
+  # customer-frontend/vercel.json.
   # ---------------------------------------------------------------------------
   frontend:
     name: Frontend
