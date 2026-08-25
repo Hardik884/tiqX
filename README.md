@@ -1,11 +1,17 @@
 # tiqX
 
-A ticket booking platform for movies and concerts: event discovery, a live
-visual seat map, seat holds with a countdown, booking confirmation with
-QR-coded tickets emailed automatically, cancellation, and a FIFO waitlist
-with time-limited offers when a seat frees up. Backend in TypeScript/Express
-on PostgreSQL and Redis; one React frontend serving customers, organisers and
-admins from a single deployment.
+[![CI](https://github.com/Hardik884/tiqX/actions/workflows/ci.yml/badge.svg)](https://github.com/Hardik884/tiqX/actions/workflows/ci.yml)
+
+A ticket booking platform for movies and concerts, built the way a real box
+office has to work: concurrent buyers racing for the same seat never
+double-sell it, a half-finished purchase can't leave a seat stuck, and every
+side effect — a Redis signal, a ticket email, a WebSocket broadcast — either
+happens or is durably retried, never silently dropped. Event discovery, a
+live visual seat map, seat holds with a countdown, QR-ticketed booking,
+cancellation, and a FIFO waitlist with time-limited offers, all provably
+correct under concurrency rather than merely working in the demo. TypeScript/
+Express API on PostgreSQL and Redis; one React frontend serving customers,
+organisers and admins from a single deployment.
 
 ## Reviewing this project
 
@@ -86,6 +92,48 @@ accounts above.
 - **Admin workspace** — platform-wide totals, venue creation and seat-layout
   management (premium/standard categories), every organiser's events, and
   account role management.
+
+## Engineering highlights
+
+What makes this more than a CRUD ticketing demo:
+
+- **Concurrency correctness by construction, not by luck.** Holding a seat is
+  `SELECT ... FOR UPDATE` on `show_seats`, `ORDER BY id` so two overlapping
+  multi-seat requests can never form a lock cycle. No application mutex, no
+  Redis lock, no advisory lock — PostgreSQL's own row lock is the sole
+  arbiter of a contested seat, and that's asserted directly: concurrency
+  tests fire 50 simultaneous requests at one seat and check exactly one wins.
+- **The transactional outbox pattern, applied consistently.** PostgreSQL and
+  Redis can't share a transaction, so every cross-system effect — a Redis
+  expiry key, a ticket email, a WebSocket seat-status broadcast, a waitlist
+  allocation signal — is written as a durable row in the *same* transaction
+  as the domain change, then delivered at-least-once by a worker polling
+  with `FOR UPDATE SKIP LOCKED` and exponential backoff. A worker can crash
+  mid-delivery and nothing is lost; correctness never depends on a
+  background process running exactly on time.
+- **Idempotency as a first-class primitive, not a nice-to-have.** Every
+  hold-creation and hold-confirmation request requires an `Idempotency-Key`.
+  A `UNIQUE (user_id, key)` constraint is the actual synchronisation
+  primitive — a retried request blocks on the index itself and replays the
+  **exact stored response**, rather than trusting a best-effort cache.
+- **Real-time state that can't drift from the truth.** The WebSocket seat
+  feed is fed by the same outbox mechanism, fanned out through Redis
+  pub/sub — but Redis is provably non-authoritative: every key in it could
+  be deleted and no seat's availability would change, because PostgreSQL
+  (`show_seats` + `reservation_holds`) is the only table that decides
+  ownership.
+- **A test suite that actually exercises the hard parts.** 528 tests across
+  157 suites run against real PostgreSQL and Redis — never mocks — because
+  an in-memory stand-in proves nothing about row-locking or atomicity.
+  Dedicated concurrency suites hammer seat holds, booking cancellation, the
+  waitlist, and distributed rate limiting with dozens of simultaneous
+  requests; migration tests roll every schema change down and back up and
+  assert the resulting indexes and constraints directly.
+- **CI/CD that gates, not just runs.** GitHub Actions runs the full suite
+  against disposable PostgreSQL/Redis service containers on every pull
+  request; Vercel and Render deploy straight from a green `main`, with
+  production migrations run automatically as Render's pre-deploy step —
+  see [CI/CD](#cicd).
 
 ## Architecture overview
 
