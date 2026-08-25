@@ -69,6 +69,62 @@ Then start the API (`npm run dev`), the workers, and the frontend
 (`cd customer-frontend && npm run dev`), and sign in with any of the three
 accounts above.
 
+### Screenshots
+
+<table>
+<tr>
+<td width="50%">
+
+**Event discovery**
+![Event discovery — browse and filter live events](docs/screenshots/customer-discovery.png)
+
+</td>
+<td width="50%">
+
+**Live seat map**
+![Live seat map — premium/standard categories, real-time availability](docs/screenshots/customer-seatmap.png)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Seat selection & pricing**
+![A held seat priced and ready to reserve](docs/screenshots/customer-seat-selection.png)
+
+</td>
+<td width="50%">
+
+**Booking confirmed — QR ticket**
+![Confirmed booking with a scannable QR ticket](docs/screenshots/customer-ticket.png)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Organiser dashboard**
+![Organiser dashboard — live bookings, seats sold and revenue](docs/screenshots/organiser-dashboard.png)
+
+</td>
+<td width="50%">
+
+**Admin dashboard**
+![Admin dashboard — platform-wide events, venues and revenue](docs/screenshots/admin-dashboard.png)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Admin venue seat layout**
+![Admin building a venue's seat layout, row by row](docs/screenshots/admin-venue-layout.png)
+
+</td>
+<td width="50%"></td>
+</tr>
+</table>
+
 ## Main features
 
 - **Auth** — registration, login, short-lived access tokens + rotating
