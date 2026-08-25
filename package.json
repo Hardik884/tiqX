@@ -18,6 +18,7 @@
     "migrate:up": "npm run migrate -- up",
     "migrate:down": "npm run migrate -- down",
     "migrate:create": "npm run migrate -- create --migration-file-language ts",
+    "seed:demo": "tsx scripts/seed-demo.ts",
     "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts"
   },
   "repository": {
